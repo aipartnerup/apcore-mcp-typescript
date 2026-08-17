@@ -8,24 +8,13 @@
  * inputs are rejected.
  */
 
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
+import { loadFixture, skipMessage } from "./conformance-fixtures.js";
 import { buildMiddlewareFromConfig } from "../src/middleware-builder.js";
 
 // ---------------------------------------------------------------------------
 // Fixture loader
 // ---------------------------------------------------------------------------
-
-const FIXTURE_PATH = resolve(
-  __dirname,
-  "..",
-  "..",
-  "apcore-mcp",
-  "conformance",
-  "fixtures",
-  "middleware_config.json",
-);
 
 interface Fixture {
   test_cases: Array<{
@@ -42,12 +31,7 @@ interface Fixture {
   }>;
 }
 
-function loadFixture(): Fixture | null {
-  if (!existsSync(FIXTURE_PATH)) return null;
-  return JSON.parse(readFileSync(FIXTURE_PATH, "utf-8")) as Fixture;
-}
-
-const FIXTURE = loadFixture();
+const FIXTURE = loadFixture<Fixture>("middleware_config.json");
 
 // ---------------------------------------------------------------------------
 // Class-name → conformance-label mapping
@@ -79,7 +63,7 @@ function labels(instances: unknown[]): string[] {
 
 describe("conformance: buildMiddlewareFromConfig success cases", () => {
   if (!FIXTURE) {
-    it.skip(`fixture not found at ${FIXTURE_PATH}`, () => {});
+    it.skip(skipMessage("middleware_config.json"), () => {});
     return;
   }
   for (const c of FIXTURE.test_cases) {
@@ -94,7 +78,7 @@ describe("conformance: buildMiddlewareFromConfig success cases", () => {
 
 describe("conformance: buildMiddlewareFromConfig error cases", () => {
   if (!FIXTURE) {
-    it.skip(`fixture not found at ${FIXTURE_PATH}`, () => {});
+    it.skip(skipMessage("middleware_config.json"), () => {});
     return;
   }
   for (const c of FIXTURE.error_cases) {

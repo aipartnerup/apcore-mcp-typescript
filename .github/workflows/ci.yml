@@ -13,6 +13,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check out conformance fixtures
+        uses: actions/checkout@v4
+        with:
+          repository: aiperceivable/apcore-mcp
+          path: apcore-mcp
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
