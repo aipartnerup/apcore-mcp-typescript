@@ -54,6 +54,18 @@ class SentinelModule {
   readonly hooksInvoked: string[] = [];
 
   readonly description = "Deletes a directory tree";
+  // Annotated so the `requires_approval` case below has something to report.
+  // Governance annotations are metadata the ACL never reads, which is exactly
+  // why they survive a denial — see that test.
+  readonly annotations = {
+    requiresApproval: true,
+    destructive: true,
+    readonly: false,
+    idempotent: false,
+    openWorld: false,
+    streaming: false,
+    extra: {},
+  };
   readonly inputSchema = {
     type: "object",
     properties: { path: { type: "string" } },
@@ -212,6 +224,26 @@ describe("__apcore_module_preview disclosure gate (PROTOCOL_SPEC §12.8.5.1)", (
     expect(envelope.predicted_changes).toHaveLength(1);
     expect(envelope.predicted_changes[0]?.target).toBe(SENTINEL_TARGET);
     expect(JSON.stringify(envelope)).toContain(SENTINEL_BINARY);
+  });
+
+  it("reports requires_approval=true to a denied caller (cross-SDK divergence)", async () => {
+    // Deliberate, and pinned because apcore-mcp-rust diverges here.
+    //
+    // §12.8.5.1 withholds MODULE-AUTHORED introspection — what `preflight()`
+    // and `preview()` computed. `requires_approval` is neither: apcore-js
+    // resolves it from the module's declared annotations (or the
+    // ExecutionPolicy) at a point before the disclosure gate, and the fixture
+    // `preflight_disclosure.json` deliberately asserts nothing about it.
+    //
+    // It is also not much of a disclosure: it says the module is
+    // approval-gated, not what the call would touch. Zeroing it would cost a
+    // denied caller the ability to distinguish "denied" from "denied AND would
+    // have needed approval anyway".
+    const { envelope } = await previewDenied();
+
+    expect(envelope.requires_approval).toBe(true);
+    // ...while still disclosing nothing the module computed.
+    expect(envelope.predicted_changes).toEqual([]);
   });
 
   it("a schema failure alone does NOT withhold the preview", async () => {
