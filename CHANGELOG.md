@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Security
+
+- **`__apcore_module_preview` no longer discloses module introspection to a
+  caller the ACL denied.** The bridge serialises `Executor.validate()`'s
+  `PreflightResult` verbatim, and apcore-js `<=0.26.0` gated
+  `Module.preflight()` / `Module.preview()` on module lookup alone — pipeline
+  Step 3 — while the ACL check is Step 4. A denied caller therefore ran
+  module-authored code and received what it returned: for a command-wrapping
+  module the resolved binary and its argv, for a writer the target of the side
+  effect. Raising the `apcore-js` floor to `>=0.27.0` closes it at the layer
+  that owns the gate (PROTOCOL_SPEC §12.8.5.1, spec v1.13.0, apcore#96); no
+  bridge code changed. A denied caller still receives the failed `acl` check, so
+  it still learns why. Pinned by `tests/server/preflightDisclosure.test.ts`,
+  which drives a real `Executor` over a real `Registry` and a real `ACL` and
+  asserts a sentinel binary path and argv appear nowhere in the denied envelope.
+
+### Changed
+
+- **Required `apcore-js` floor raised to `>=0.27.0`.** Of the 0.27 breaking
+  changes, only the `validate()` disclosure gate above reaches this package: the
+  bridge does not construct pipelines from YAML, does not use
+  `SchemaValidator`'s coercion knob, does not configure `obs.redaction`, and
+  registers no `StepMiddleware`.
+
 ## [0.17.2] - 2026-07-14
 
 Patch release. Fixes the MCP elicitation approval flow and bumps the required `apcore-js` floor to `0.26.0`.

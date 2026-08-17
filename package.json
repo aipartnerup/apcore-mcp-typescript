@@ -49,7 +49,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": ">=1.26.0",
-    "apcore-js": ">=0.26.0",
+    "apcore-js": ">=0.27.0",
     "apcore-toolkit": ">=0.10.0",
     "jsonwebtoken": ">=9.0.3",
     "mcp-embedded-ui": ">=0.4.0"
