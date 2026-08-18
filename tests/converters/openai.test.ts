@@ -523,6 +523,114 @@ describe("OpenAIConverter", () => {
       expect(tupleItem.additionalProperties).toBe(false);
     });
 
+    // [A-D-OC-2] The strict walker must enter composition branches. Called
+    // directly because SchemaConverter's own _applyStrict already hardens
+    // additionalProperties; what is missing here is the rest of strict mode
+    // (required hardening, sorting, default stripping) inside oneOf/anyOf/allOf.
+    it("[A-D-OC-2] hardens object branches inside anyOf", () => {
+      const schema = {
+        type: "object",
+        properties: {
+          // The shape a Pydantic Optional[Model] takes after $ref inlining.
+          payload: {
+            anyOf: [
+              {
+                type: "object",
+                properties: { z: { type: "string" }, a: { type: "integer" } },
+              },
+              { type: "null" },
+            ],
+          },
+        },
+        required: ["payload"],
+      };
+
+      const result = converter._applyStrictMode(schema) as Record<string, unknown>;
+      const props = result.properties as Record<string, Record<string, unknown>>;
+      const branch = (props.payload.anyOf as Array<Record<string, unknown>>)[0];
+
+      expect(branch.additionalProperties).toBe(false);
+      expect(branch.required).toEqual(["a", "z"]);
+    });
+
+    it("[A-D-OC-2] hardens object branches inside oneOf and allOf", () => {
+      const schema = {
+        type: "object",
+        properties: {
+          one: {
+            oneOf: [{ type: "object", properties: { b: { type: "string" } } }],
+          },
+          all: {
+            allOf: [{ type: "object", properties: { c: { type: "string" } } }],
+          },
+        },
+        required: ["one", "all"],
+      };
+
+      const result = converter._applyStrictMode(schema) as Record<string, unknown>;
+      const props = result.properties as Record<string, Record<string, unknown>>;
+
+      const oneBranch = (props.one.oneOf as Array<Record<string, unknown>>)[0];
+      const allBranch = (props.all.allOf as Array<Record<string, unknown>>)[0];
+      expect(oneBranch.additionalProperties).toBe(false);
+      expect(oneBranch.required).toEqual(["b"]);
+      expect(allBranch.additionalProperties).toBe(false);
+      expect(allBranch.required).toEqual(["c"]);
+    });
+
+    it("[A-D-OC-2] recurses into legacy `definitions` as well as $defs", () => {
+      const schema = {
+        type: "object",
+        definitions: {
+          Address: {
+            type: "object",
+            properties: { street: { type: "string" }, city: { type: "string" } },
+            required: ["street"],
+          },
+        },
+        properties: { name: { type: "string" } },
+        required: ["name"],
+      };
+
+      const result = converter._applyStrictMode(schema) as Record<string, unknown>;
+      const defs = result.definitions as Record<string, Record<string, unknown>>;
+      expect(defs.Address.additionalProperties).toBe(false);
+      expect(defs.Address.required).toEqual(["city", "street"]);
+    });
+
+    // [A-D-OC-4] Rust drops `default` in one pass over every node
+    // (openai.rs:527) and Python's _strip_extensions does the same; TypeScript
+    // only deleted it from direct entries of a `properties` map.
+    it("[A-D-OC-4] strips `default` from every schema node", () => {
+      const schema = {
+        type: "object",
+        default: "root-default",
+        properties: {
+          list: { type: "array", items: { type: "string", default: "x" } },
+          payload: {
+            anyOf: [
+              {
+                type: "object",
+                properties: { k: { type: "string", default: "inner" } },
+              },
+              { type: "null" },
+            ],
+          },
+        },
+        required: ["list", "payload"],
+      };
+
+      const result = converter._applyStrictMode(schema) as Record<string, unknown>;
+      const props = result.properties as Record<string, Record<string, unknown>>;
+      const items = props.list.items as Record<string, unknown>;
+      const branch = (props.payload.anyOf as Array<Record<string, unknown>>)[0];
+      const inner = (branch.properties as Record<string, Record<string, unknown>>).k;
+
+      expect(result.default).toBeUndefined();
+      expect(items.default).toBeUndefined();
+      expect(inner.default).toBeUndefined();
+    });
+
     // D11-012: Missing oneOf nullable wrap for $ref properties
     it("D11-012: wraps optional $ref property in oneOf nullable", () => {
       // Call _applyStrictMode directly because SchemaConverter inlines $refs

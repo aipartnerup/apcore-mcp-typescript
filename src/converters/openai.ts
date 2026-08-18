@@ -254,14 +254,23 @@ export class OpenAIConverter {
   }
 
   /**
-   * Recursively strip all keys starting with `x-` from every schema node.
-   * Mirrors Rust's `apply_strict_mode` step 2. [D11-003]
+   * Recursively strip all keys starting with `x-`, and all `default` keys, from
+   * every schema node.
+   *
+   * Mirrors Rust's `apply_strict_mode` step 2 (`openai.rs:527` retains on
+   * `!k.starts_with("x-") && k != "default"`) and Python's `_strip_extensions`
+   * with `strip_defaults=True`. [D11-003]
+   *
+   * [A-D-OC-4] `default` used to be deleted only from direct entries of a
+   * `properties` map inside `_applyStrictRecursive`, so a default on `items`, at
+   * the schema root, or inside a oneOf/anyOf/allOf branch survived into the
+   * emitted tool while Rust and Python dropped it.
    */
   private _stripExtensions(schema: JsonSchema): void {
     if (typeof schema !== "object" || schema === null) return;
     const obj = schema as Record<string, unknown>;
     for (const key of Object.keys(obj)) {
-      if (key.startsWith("x-")) {
+      if (key.startsWith("x-") || key === "default") {
         delete obj[key];
       } else {
         const value = obj[key];
@@ -304,8 +313,8 @@ export class OpenAIConverter {
       for (const propName of allPropertyNames) {
         const propSchema = properties[propName];
 
-        // [D11-003] Remove default values from all sub-schemas
-        delete propSchema["default"];
+        // [A-D-OC-4] `default` is already gone: _stripExtensions removes it from
+        // every node before this walker runs.
 
         // If not already required, make it nullable
         if (!existingRequired.has(propName)) {
@@ -351,11 +360,30 @@ export class OpenAIConverter {
       );
     }
 
-    // Recurse into $defs (caller-provided schemas that still have definitions)
-    if (schema["$defs"] && typeof schema["$defs"] === "object" && !Array.isArray(schema["$defs"])) {
-      const defs = schema["$defs"] as Record<string, JsonSchema>;
-      for (const [k, v] of Object.entries(defs)) {
-        defs[k] = this._applyStrictRecursive(v);
+    // [A-D-OC-2] Recurse into composition branches. A Pydantic `Optional[Model]`
+    // becomes `anyOf: [{type:"object", ...}, {type:"null"}]` after $ref inlining,
+    // so skipping these left the nested object without additionalProperties:
+    // false and without hardened `required` — which OpenAI strict mode rejects.
+    // Mirrors openai.rs:622-637 and Python's _convert_to_strict.
+    for (const keyword of ["oneOf", "anyOf", "allOf"] as const) {
+      const branches = schema[keyword];
+      if (Array.isArray(branches)) {
+        schema[keyword] = (branches as JsonSchema[]).map((branch) =>
+          this._applyStrictRecursive(branch),
+        );
+      }
+    }
+
+    // Recurse into $defs / definitions (caller-provided schemas that still
+    // carry them). `definitions` is the pre-2019-09 spelling and is what
+    // Python and Rust both walk alongside `$defs`.
+    for (const defsKey of ["$defs", "definitions"] as const) {
+      const defs = schema[defsKey];
+      if (defs && typeof defs === "object" && !Array.isArray(defs)) {
+        const map = defs as Record<string, JsonSchema>;
+        for (const [k, v] of Object.entries(map)) {
+          map[k] = this._applyStrictRecursive(v);
+        }
       }
     }
 
