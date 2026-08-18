@@ -18,7 +18,18 @@ export interface ApprovalRequest {
 
 export interface ApprovalResult {
   status: "approved" | "rejected" | "timeout" | "pending";
+  /** Human-readable explanation. Never used to carry the approval id. */
   reason?: string | null;
+  /**
+   * Identifier of a pending approval, echoed back by the agent as
+   * `_meta.approvalId` and polled via `__apcore_approval_check`.
+   *
+   * [A-D-AP-1] Matches apcore-js `ApprovalResult.approvalId`, Python's
+   * `ApprovalResult(approval_id=...)` and Rust's `result.approval_id`. It was
+   * previously smuggled through `reason`, which left the field this repo's own
+   * ApprovalBridge reads (`{status; reason?; approvalId?}`) undefined.
+   */
+  approvalId?: string;
 }
 
 /**
@@ -150,7 +161,7 @@ export class StorageBackedApprovalHandler {
       }
     }
 
-    return { status: "pending", reason: approvalId };
+    return { status: "pending", approvalId };
   }
 
   async checkApproval(approvalId: string): Promise<ApprovalResult> {
@@ -164,6 +175,8 @@ export class StorageBackedApprovalHandler {
     if (record.status === "rejected") {
       return { status: "rejected", reason: record.reason ?? undefined };
     }
-    return { status: "pending" };
+    // [A-D-AP-1] Echo the id on the pending path, matching Python
+    // (approval.py: ApprovalResult(status="pending", approval_id=approval_id)).
+    return { status: "pending", approvalId };
   }
 }

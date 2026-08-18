@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { ElicitationApprovalHandler } from "../../src/adapters/approval.js";
+import {
+  ElicitationApprovalHandler,
+  StorageBackedApprovalHandler,
+} from "../../src/adapters/approval.js";
+import { InMemoryApprovalStore } from "../../src/approval-store.js";
 import { MCP_ELICIT_KEY } from "../../src/helpers.js";
 
 describe("ElicitationApprovalHandler", () => {
@@ -145,5 +149,75 @@ describe("ElicitationApprovalHandler", () => {
 
     expect(result.status).toBe("rejected");
     expect(result.reason).toContain("Phase B");
+  });
+});
+
+describe("StorageBackedApprovalHandler", () => {
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it("[A-D-AP-1] returns the approval id in approvalId, not in reason", async () => {
+    const store = new InMemoryApprovalStore();
+    try {
+      const handler = new StorageBackedApprovalHandler(store);
+
+      const result = await handler.requestApproval({
+        moduleId: "test.module",
+        arguments: { x: 1 },
+      });
+
+      expect(result.status).toBe("pending");
+      // Python returns ApprovalResult(status="pending", approval_id=...) and Rust
+      // sets result.approval_id; `reason` is human-readable text in all three.
+      expect(result.approvalId).toMatch(UUID_RE);
+      expect(result.reason ?? undefined).toBeUndefined();
+
+      // The id must address the record the handler actually persisted.
+      const record = await store.getResult(result.approvalId!);
+      expect(record).not.toBeNull();
+      expect(record!.moduleId).toBe("test.module");
+    } finally {
+      store.stop();
+    }
+  });
+
+  it("[A-D-AP-1] checkApproval echoes approvalId while still pending", async () => {
+    const store = new InMemoryApprovalStore();
+    try {
+      const handler = new StorageBackedApprovalHandler(store);
+      const pending = await handler.requestApproval({
+        moduleId: "test.module",
+        arguments: {},
+      });
+
+      const checked = await handler.checkApproval(pending.approvalId!);
+
+      expect(checked.status).toBe("pending");
+      expect(checked.approvalId).toBe(pending.approvalId);
+    } finally {
+      store.stop();
+    }
+  });
+
+  it("checkApproval carries the rejection reason, not an id", async () => {
+    const store = new InMemoryApprovalStore();
+    try {
+      const handler = new StorageBackedApprovalHandler(store);
+      const pending = await handler.requestApproval({
+        moduleId: "test.module",
+        arguments: {},
+      });
+      await store.resolve(pending.approvalId!, {
+        approved: false,
+        reason: "denied by operator",
+      });
+
+      const checked = await handler.checkApproval(pending.approvalId!);
+
+      expect(checked.status).toBe("rejected");
+      expect(checked.reason).toBe("denied by operator");
+    } finally {
+      store.stop();
+    }
   });
 });
