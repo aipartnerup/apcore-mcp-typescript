@@ -312,7 +312,13 @@ export class ErrorMapper {
    */
   toMcpErrorAny(error: unknown): McpErrorResponse {
     const ModuleError = _apcoreErrorClasses?.ModuleError;
-    if (ModuleError && error instanceof ModuleError) {
+    // [A-D-EM-5] The duck-type check is not a nicety: `_loadApcoreErrorClasses`
+    // is kicked off without being awaited, so `ModuleError` is undefined for
+    // every call made before that promise settles — and permanently if apcore-js
+    // cannot be resolved. Without the fallback a genuine ModuleError collapsed
+    // to GENERAL_INTERNAL_ERROR, discarding errorType, details, retryable and
+    // aiGuidance. toMcpError has carried the same fallback all along.
+    if ((ModuleError && error instanceof ModuleError) || this._isModuleError(error)) {
       return this.toMcpError(error);
     }
     return internalErrorResponse();
