@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -149,6 +149,30 @@ describe("CLI (cli.ts)", () => {
     expect(exitCode).toBe(0);
     expect(logMessages.some((m) => m.includes("apcore-mcp"))).toBe(true);
     expect(logMessages.some((m) => m.includes("--extensions-dir"))).toBe(true);
+  });
+
+  it("[B-TS-11] documents every accepted flag in the help output", async () => {
+    // --jwt-key-file was implemented, README-documented and the highest-priority
+    // key source (--jwt-key-file > --jwt-secret > APCORE_JWT_SECRET), yet absent
+    // from printUsage, so `apcore-mcp --help` never mentioned it. Deriving the
+    // expected flags from parseArgs keeps help and options in step from now on.
+    const source = readFileSync(
+      new URL("../src/cli.ts", import.meta.url),
+      "utf8",
+    );
+    const optionsStart = source.indexOf("options: {") + "options: {".length;
+    const optionsBlock = source.slice(optionsStart, source.indexOf("strict: true"));
+    const flags = [...optionsBlock.matchAll(/^\s*"?([a-z][a-z-]*)"?:\s*\{/gm)].map(
+      (m) => `--${m[1]}`,
+    );
+    expect(flags).toContain("--jwt-key-file");
+
+    const { exitCode } = await runMain(["--help"]);
+    expect(exitCode).toBe(0);
+    const help = logMessages.join("\n");
+
+    const undocumented = flags.filter((flag) => !help.includes(flag));
+    expect(undocumented).toEqual([]);
   });
 
   // ── Argument validation ────────────────────────────────────────────────

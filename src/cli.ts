@@ -35,6 +35,8 @@ Options:
   --explorer                 Enable the browser-based Tool Explorer UI (HTTP only)
   --explorer-prefix <path>   URL prefix for the explorer UI (default: /explorer)
   --allow-execute            Allow tool execution from the explorer UI
+  --jwt-key-file <path>      File holding the JWT key (PEM or secret); highest-priority
+                             key source: --jwt-key-file > --jwt-secret > APCORE_JWT_SECRET
   --jwt-secret <string>      JWT secret key for Bearer token authentication
   --jwt-algorithm <alg>      JWT algorithm (default: HS256)
   --jwt-audience <string>    Expected JWT audience claim
