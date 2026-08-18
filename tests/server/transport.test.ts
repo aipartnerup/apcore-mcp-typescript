@@ -349,6 +349,76 @@ describe("TransportManager", () => {
     });
   });
 
+  describe("[A-D-TR-2] runStdio async-task teardown", () => {
+    it("mints a session id and cancels session tasks when the transport closes", async () => {
+      const mgr = new TransportManager();
+      const cancelSessionTasks = vi.fn().mockResolvedValue(0);
+      mgr.setAsyncTaskBridge({ cancelSessionTasks });
+
+      let connected: { onclose?: () => void } | undefined;
+      const mockServer = {
+        connect: vi.fn(async (transport: { onclose?: () => void }) => {
+          connected = transport;
+        }),
+      } as unknown as Server;
+
+      await mgr.runStdio(mockServer);
+
+      expect(connected).toBeDefined();
+      expect(connected!.onclose).toBeTypeOf("function");
+
+      connected!.onclose!();
+
+      // The set_async_task_bridge contract is not restricted to network
+      // transports: Python honours it on stdio (transport.py:106-113), and the
+      // SSE/streamable-http paths in this file already wire onclose.
+      expect(cancelSessionTasks).toHaveBeenCalledTimes(1);
+      const sessionId = cancelSessionTasks.mock.calls[0][0] as string;
+      expect(typeof sessionId).toBe("string");
+      expect(sessionId.length).toBeGreaterThan(0);
+    });
+
+    it("preserves a pre-existing onclose handler", async () => {
+      const mgr = new TransportManager();
+      const cancelSessionTasks = vi.fn().mockResolvedValue(0);
+      mgr.setAsyncTaskBridge({ cancelSessionTasks });
+
+      let connected: { onclose?: () => void } | undefined;
+      const mockServer = {
+        connect: vi.fn(async (transport: { onclose?: () => void }) => {
+          connected = transport;
+        }),
+      } as unknown as Server;
+
+      await mgr.runStdio(mockServer);
+
+      const later = vi.fn();
+      const wired = connected!.onclose!;
+      connected!.onclose = () => {
+        wired();
+        later();
+      };
+      connected!.onclose!();
+
+      expect(cancelSessionTasks).toHaveBeenCalledTimes(1);
+      expect(later).toHaveBeenCalledTimes(1);
+    });
+
+    it("is a no-op when no async task bridge is configured", async () => {
+      const mgr = new TransportManager();
+      let connected: { onclose?: () => void } | undefined;
+      const mockServer = {
+        connect: vi.fn(async (transport: { onclose?: () => void }) => {
+          connected = transport;
+        }),
+      } as unknown as Server;
+
+      await mgr.runStdio(mockServer);
+
+      expect(() => connected!.onclose?.()).not.toThrow();
+    });
+  });
+
   describe("close", () => {
     it("closes the HTTP server", async () => {
       const mgr = new TransportManager();

@@ -478,6 +478,26 @@ export class TransportManager {
    */
   async runStdio(server: Server): Promise<void> {
     const transport = new StdioServerTransport();
+
+    // [A-D-TR-2] stdio has no wire-level session id, so synthesize one and wire
+    // teardown cancellation the same way runSse and runStreamableHttp do. The
+    // set_async_task_bridge contract is not restricted to network transports —
+    // Python honours it on stdio (transport.py:106-113) — and without this,
+    // async tasks submitted over stdio outlived the client's exit.
+    if (this._asyncTaskBridge) {
+      const sessionId = crypto.randomUUID();
+      const existing = transport.onclose;
+      transport.onclose = () => {
+        this._asyncTaskBridge?.cancelSessionTasks(sessionId).catch((err: unknown) => {
+          console.warn(
+            `cancelSessionTasks failed for stdio session ${sessionId}:`,
+            err,
+          );
+        });
+        if (existing) existing();
+      };
+    }
+
     await server.connect(transport);
   }
 
