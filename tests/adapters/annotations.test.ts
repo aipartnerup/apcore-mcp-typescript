@@ -266,6 +266,27 @@ describe("AnnotationMapper", () => {
       expect(suffix).not.toContain("internal_flag");
     });
 
+    // [A-D-AM-3] localeCompare uses ICU collation, where primary letter weight
+    // beats case, so it emitted "cost" before "Model". Python's sorted() and
+    // Rust's String::cmp are ordinal codepoint comparisons and emit "Model"
+    // first. localeCompare is also host-locale dependent, so the output was not
+    // byte-stable across environments either.
+    it("[A-D-AM-3] sorts mcp_* extras ordinally, not by locale collation", () => {
+      const suffix = mapper.toDescriptionSuffix({
+        ...defaultAnnotations,
+        destructive: true,
+        extra: {
+          mcp_cost: "high",
+          mcp_Model: "sd-xl",
+        },
+      } as Parameters<typeof mapper.toDescriptionSuffix>[0]);
+
+      // "M" (U+004D) sorts before "c" (U+0063) by codepoint.
+      expect(suffix.indexOf("Model: sd-xl")).toBeLessThan(
+        suffix.indexOf("cost: high"),
+      );
+    });
+
     // D11-022: mcp_extras must appear in alphabetical key order
     it("D11-022: mcp_* extras are emitted in alphabetical order", () => {
       const mapper = new AnnotationMapper();

@@ -120,11 +120,19 @@ export class AnnotationMapper {
     )
       parts.push(`pagination_style=${annotations.paginationStyle}`);
 
-    // Append mcp_-prefixed extra fields (sorted alphabetically for deterministic output,
-    // matching Python+Rust sort behavior). [D11-022]
+    // Append mcp_-prefixed extra fields, sorted by codepoint for deterministic
+    // output matching Python+Rust sort behavior. [D11-022]
+    //
+    // [A-D-AM-3] Ordinal, not localeCompare: ICU collation ranks primary letter
+    // weight above case, so localeCompare emitted "cost" before "Model" where
+    // Python's sorted() (annotations.py:134) and Rust's String::cmp
+    // (annotations.rs:131) emit "Model" first. It is also host-locale
+    // dependent, so the output was not byte-stable across environments.
     const extraLines: string[] = [];
     if (annotations.extra && typeof annotations.extra === "object") {
-      for (const [key, value] of Object.entries(annotations.extra).sort(([a], [b]) => a.localeCompare(b))) {
+      for (const [key, value] of Object.entries(annotations.extra).sort(
+        ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+      )) {
         if (key.startsWith("mcp_") && typeof value === "string") {
           const strippedKey = key.slice(4); // remove "mcp_" prefix
           extraLines.push(`${strippedKey}: ${value}`);
