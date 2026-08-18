@@ -115,9 +115,14 @@ export class JWTAuthenticator implements Authenticator {
 
       const claims = payload as Record<string, unknown>;
 
-      // Check required claims are present
+      // Check required claims carry a value.
+      // [A-D-JWT-3] A key-presence test accepted `{"org_id": null}`, while
+      // PyJWT's `require` option validates with `payload.get(claim) is None`
+      // and rejects it. Only null/undefined fail here — 0, "" and false are
+      // present values that Python accepts too.
       for (const claim of this._requireClaims) {
-        if (!(claim in claims)) return null;
+        const value = claims[claim];
+        if (value === undefined || value === null) return null;
       }
 
       const rawId = claims[this._claimMapping.id];

@@ -355,6 +355,42 @@ describe("JWTAuthenticator", () => {
     expect(identity!.id).toBe("user-1");
   });
 
+  it("[A-D-JWT-3] returns null when a required claim is present but null", async () => {
+    // PyJWT's `require` option validates with `payload.get(claim) is None`, so
+    // Python rejects {"org_id": null}. A key-presence test (`claim in claims`)
+    // accepted it and authenticated the caller — fail-open against the reference
+    // implementation.
+    const auth = new JWTAuthenticator({
+      secret: SECRET,
+      requireClaims: ["sub", "org_id"],
+    });
+    const token = signToken({ sub: "user-1", org_id: null });
+    const req = makeReq({ authorization: `Bearer ${token}` });
+
+    const identity = await auth.authenticate(req);
+    expect(identity).toBeNull();
+  });
+
+  it("[A-D-JWT-3] accepts a required claim carrying a falsy but non-null value", async () => {
+    // Only null/undefined are rejected: 0, "" and false are present values and
+    // PyJWT accepts them too.
+    const auth = new JWTAuthenticator({
+      secret: SECRET,
+      requireClaims: ["sub", "seat_count", "label", "active"],
+    });
+    const token = signToken({
+      sub: "user-1",
+      seat_count: 0,
+      label: "",
+      active: false,
+    });
+    const req = makeReq({ authorization: `Bearer ${token}` });
+
+    const identity = await auth.authenticate(req);
+    expect(identity).not.toBeNull();
+    expect(identity!.id).toBe("user-1");
+  });
+
   it("returns null when requireClaims is empty and id claim is missing", async () => {
     const auth = new JWTAuthenticator({
       secret: SECRET,
