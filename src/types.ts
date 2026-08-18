@@ -83,7 +83,15 @@ export interface ModuleAnnotations {
   streaming: boolean;
   cacheable?: boolean;
   cacheTtl?: number;
-  cacheKeyFields?: string[] | null;
+  /**
+   * Input fields used to compute the cache key (null = all fields).
+   *
+   * [B-TS-3] Declared `readonly string[]` to match apcore-js's own
+   * `ModuleAnnotations.cacheKeyFields`. A mutable `string[]` here made every real
+   * apcore-js `Registry` fail to satisfy this interface (TS2345), which broke the
+   * documented "pass an existing Registry" pattern for all TypeScript consumers.
+   */
+  cacheKeyFields?: readonly string[] | null;
   paginated?: boolean;
   paginationStyle?: string;
   extra?: Record<string, unknown>;

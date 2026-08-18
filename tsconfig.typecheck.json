@@ -1,0 +1,19 @@
+{
+  // [B-TS-3] tsconfig.json deliberately excludes tests/ (it is the build config,
+  // rootDir src/). This project adds the type-level regression tests under
+  // tests/types/ so that structural drift between src/types.ts and apcore-js is
+  // caught by `pnpm typecheck` instead of only by downstream consumers.
+  //
+  // Only tests/types/ is included: the behavioural tests under tests/ are written
+  // against vitest's looser inference and do not currently typecheck cleanly.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "tests/types/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
