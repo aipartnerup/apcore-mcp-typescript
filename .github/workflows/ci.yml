@@ -10,7 +10,9 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     env:
-      APCORE_CONFORMANCE_FIXTURES: ${{ github.workspace }}/apcore-mcp
+      # The fixtures directory itself, not the checkout root — see
+      # tests/conformance-fixtures.ts for how this is resolved.
+      APCORE_CONFORMANCE_FIXTURES: ${{ github.workspace }}/apcore-mcp/conformance/fixtures
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -22,11 +22,25 @@ const FIXTURE_SUBPATH = ["apcore-mcp", "conformance", "fixtures"];
 const ENV_OVERRIDE = "APCORE_CONFORMANCE_FIXTURES";
 const MAX_ASCENT = 4;
 
-/** Return the shared fixtures directory, or `null` when it is not present. */
-export function fixturesDir(): string | null {
+/**
+ * Every directory that could hold the shared fixtures, in priority order.
+ *
+ * `$APCORE_CONFORMANCE_FIXTURES` contributes two candidates, not one: pointing
+ * it at the apcore-mcp checkout root is the natural reading of the name, and
+ * pointing it at the fixtures directory itself is what the variable literally
+ * says. Accepting only the latter — and returning early, so the ancestor walk
+ * never ran — is what broke CI: ci.yml set it to `$GITHUB_WORKSPACE/apcore-mcp`,
+ * an existing directory with no fixtures in it, and every conformance suite
+ * failed with the fixtures sitting one walk away. Resolution is therefore driven
+ * by "which directory actually holds this fixture", never by which path looks
+ * plausible, and a wrong override degrades to the walk instead of killing it.
+ */
+function candidateDirs(): string[] {
+  const candidates: string[] = [];
+
   const override = process.env[ENV_OVERRIDE];
   if (override) {
-    return existsSync(override) && statSync(override).isDirectory() ? override : null;
+    candidates.push(override, resolve(override, ...FIXTURE_SUBPATH.slice(1)));
   }
 
   // One walk covers both layouts: the sibling checkout developers use
@@ -35,13 +49,18 @@ export function fixturesDir(): string | null {
   // `actions/checkout` refuses to place a repository outside it.
   let dir = __dirname;
   for (let i = 0; i <= MAX_ASCENT; i += 1) {
-    const candidate = resolve(dir, ...FIXTURE_SUBPATH);
-    if (existsSync(candidate) && statSync(candidate).isDirectory()) return candidate;
+    candidates.push(resolve(dir, ...FIXTURE_SUBPATH));
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  return null;
+
+  return candidates.filter((c) => existsSync(c) && statSync(c).isDirectory());
+}
+
+/** Return the shared fixtures directory, or `null` when it is not present. */
+export function fixturesDir(): string | null {
+  return candidateDirs()[0] ?? null;
 }
 
 /**
@@ -51,8 +70,7 @@ export function fixturesDir(): string | null {
  * can `it.skip`. Throws in CI, where absence means the suite proves nothing.
  */
 export function loadFixture<T>(name: string): T | null {
-  const dir = fixturesDir();
-  if (dir) {
+  for (const dir of candidateDirs()) {
     const path = resolve(dir, name);
     if (existsSync(path)) return JSON.parse(readFileSync(path, "utf-8")) as T;
   }
