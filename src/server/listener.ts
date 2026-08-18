@@ -96,7 +96,9 @@ export class RegistryListener {
 
       const tool = this._factory.buildTool(descriptor);
       this._tools.set(moduleId, tool);
-      console.log(`RegistryListener: registered tool "${moduleId}"`);
+      // [A-D-RL-5] stderr, not stdout: the MCP stdio transport frames
+      // JSON-RPC on process.stdout and any other writer corrupts it.
+      console.error(`RegistryListener: registered tool "${moduleId}"`);
     } catch (error) {
       console.warn(
         `RegistryListener: error building tool for "${moduleId}": ${
@@ -120,7 +122,8 @@ export class RegistryListener {
     if (!this._active) return;
     const removed = this._tools.delete(moduleId);
     if (removed) {
-      console.log(`RegistryListener: unregistered tool "${moduleId}"`);
+      // [A-D-RL-5] stderr, not stdout — see _onRegister.
+      console.error(`RegistryListener: unregistered tool "${moduleId}"`);
     }
   }
 }

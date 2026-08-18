@@ -289,3 +289,54 @@ describe("D11-001: _onRegister _active guard", () => {
     expect(listener.tools.has("test.module")).toBe(true);
   });
 });
+
+describe("[A-D-RL-5] listener never logs to stdout", () => {
+  // The MCP stdio transport frames JSON-RPC on process.stdout
+  // (@modelcontextprotocol/sdk server/stdio.js writes JSON there), so every
+  // listener message must go to stderr. Asserting on console.log/console.error
+  // rather than on process.stdout.write is deliberate: vitest intercepts console
+  // output, so a process.stdout.write spy never observes console.log at all.
+  it("_onRegister logs the success message to stderr, not stdout", () => {
+    const { registry } = createMockRegistryWithCallbacks();
+    (registry.getDefinition as ReturnType<typeof vi.fn>).mockReturnValue(
+      makeDescriptor({ moduleId: "mod.stdout" }),
+    );
+    const listener = new RegistryListener(registry, new MCPServerFactory());
+    listener.start();
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    listener._onRegister("mod.stdout");
+
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("mod.stdout"));
+    expect(listener.tools.has("mod.stdout")).toBe(true);
+
+    errSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it("_onUnregister logs the removal message to stderr, not stdout", () => {
+    const { registry } = createMockRegistryWithCallbacks();
+    (registry.getDefinition as ReturnType<typeof vi.fn>).mockReturnValue(
+      makeDescriptor({ moduleId: "mod.stdout" }),
+    );
+    const listener = new RegistryListener(registry, new MCPServerFactory());
+    listener.start();
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    listener._onRegister("mod.stdout");
+    errSpy.mockClear();
+    listener._onUnregister("mod.stdout");
+
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("mod.stdout"));
+    expect(listener.tools.has("mod.stdout")).toBe(false);
+
+    errSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+});
