@@ -289,6 +289,27 @@ export class TransportManager {
   }
 
   /**
+   * Dispatch a builtin route only when that route is exempt from authentication.
+   *
+   * [A-D-TR-8] Builtin routes used to be dispatched wholesale *before*
+   * `_authenticateRequest`, which short-circuited `/usage` and served module ids,
+   * call counts, unique callers and latency to unauthenticated clients even when
+   * `requireAuth` was on. Only paths in `_exemptPaths` (default `/health` and
+   * `/metrics`) may be served pre-auth; everything else falls through to
+   * `_authenticateRequest` and is dispatched by `_handleBuiltinRoute` afterwards.
+   * Callers who genuinely want `/usage` open must opt in via `setExemptPaths`.
+   *
+   * @param req - The incoming HTTP request
+   * @param res - The server response
+   * @param url - The parsed URL
+   * @returns true if the request was handled, false otherwise
+   */
+  private _handleExemptBuiltinRoute(req: IncomingMessage, res: ServerResponse, url: URL): boolean {
+    if (!this._isAuthExempt(url.pathname, req.method ?? "GET")) return false;
+    return this._handleBuiltinRoute(req, res, url);
+  }
+
+  /**
    * Check if a request path/method combination is exempt from authentication.
    *
    * Exempt routes: /health, /metrics (GET), and explorer GET routes.
@@ -393,7 +414,8 @@ export class TransportManager {
     return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       const url = new URL(req.url ?? "/", urlBase);
 
-      if (this._handleBuiltinRoute(req, res, url)) return;
+      // Exempt builtin routes (/health, /metrics by default) are served before auth.
+      if (this._handleExemptBuiltinRoute(req, res, url)) return;
 
       // Delegate to explorer handler if path matches prefix (handles its own auth)
       if (explorerNodeHandler && explorerPrefix &&
@@ -405,6 +427,9 @@ export class TransportManager {
       // Authenticate non-exempt requests
       const { identity, blocked } = await this._authenticateRequest(req, res, url);
       if (blocked) return;
+
+      // Auth-requiring builtin routes (/usage by default) are served only now.
+      if (this._handleBuiltinRoute(req, res, url)) return;
 
       if (url.pathname !== endpoint) {
         res.writeHead(404).end("Not Found");
@@ -551,7 +576,8 @@ export class TransportManager {
     const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", `http://${options.host}:${options.port}`);
 
-      if (this._handleBuiltinRoute(req, res, url)) return;
+      // Exempt builtin routes (/health, /metrics by default) are served before auth.
+      if (this._handleExemptBuiltinRoute(req, res, url)) return;
 
       // Delegate to explorer handler if path matches prefix (handles its own auth)
       if (explorerNodeHandler && explorerPrefix &&
@@ -563,6 +589,9 @@ export class TransportManager {
       // Authenticate non-exempt requests
       const { identity, blocked } = await this._authenticateRequest(req, res, url);
       if (blocked) return;
+
+      // Auth-requiring builtin routes (/usage by default) are served only now.
+      if (this._handleBuiltinRoute(req, res, url)) return;
 
       const handleSse = async () => {
         if (url.pathname === endpoint && req.method === "GET") {

@@ -593,3 +593,86 @@ describe("Custom exempt paths integration", () => {
     expect(healthRes.status).toBe(200);
   });
 });
+
+describe("/usage endpoint authentication", () => {
+  let mgr: TransportManager;
+
+  afterEach(async () => {
+    if (mgr) await mgr.close();
+  });
+
+  const usageCollector = {
+    getSummary: (period?: string) => ({ total_calls: 7, period }),
+    getModule: (moduleId: string) => ({ module_id: moduleId, calls: 3 }),
+  };
+
+  it("returns 401 for GET /usage without a token", async () => {
+    mgr = new TransportManager();
+    mgr.setAuthenticator(new JWTAuthenticator({ secret: SECRET }));
+    mgr.setUsageCollector(usageCollector);
+    vi.spyOn(mgr, "_validateHostPort").mockImplementation(() => {});
+
+    await mgr.runStreamableHttp(createMockServer(), { host: "127.0.0.1", port: 0 });
+    const addr = mgr.httpServer!.address() as AddressInfo;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/usage`);
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toContain("total_calls");
+  });
+
+  it("serves GET /usage with a valid token", async () => {
+    mgr = new TransportManager();
+    mgr.setAuthenticator(new JWTAuthenticator({ secret: SECRET }));
+    mgr.setUsageCollector(usageCollector);
+    vi.spyOn(mgr, "_validateHostPort").mockImplementation(() => {});
+
+    await mgr.runStreamableHttp(createMockServer(), { host: "127.0.0.1", port: 0 });
+    const addr = mgr.httpServer!.address() as AddressInfo;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/usage`, {
+      headers: { Authorization: `Bearer ${signToken({ sub: "user-1" })}` },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.summary).toEqual({ total_calls: 7, period: "24h" });
+  });
+
+  it("returns 401 for GET /usage without a token in SSE mode", async () => {
+    mgr = new TransportManager();
+    mgr.setAuthenticator(new JWTAuthenticator({ secret: SECRET }));
+    mgr.setUsageCollector(usageCollector);
+    vi.spyOn(mgr, "_validateHostPort").mockImplementation(() => {});
+
+    await mgr.runSse(createMockServer(), { host: "127.0.0.1", port: 0 });
+    const addr = mgr.httpServer!.address() as AddressInfo;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/usage`);
+    expect(res.status).toBe(401);
+  });
+
+  it("serves GET /usage unauthenticated once explicitly exempted", async () => {
+    mgr = new TransportManager();
+    mgr.setAuthenticator(new JWTAuthenticator({ secret: SECRET }));
+    mgr.setUsageCollector(usageCollector);
+    mgr.setExemptPaths(["/health", "/metrics", "/usage"]);
+    vi.spyOn(mgr, "_validateHostPort").mockImplementation(() => {});
+
+    await mgr.runStreamableHttp(createMockServer(), { host: "127.0.0.1", port: 0 });
+    const addr = mgr.httpServer!.address() as AddressInfo;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/usage`);
+    expect(res.status).toBe(200);
+  });
+
+  it("serves GET /usage when no authenticator is configured", async () => {
+    mgr = new TransportManager();
+    mgr.setUsageCollector(usageCollector);
+    vi.spyOn(mgr, "_validateHostPort").mockImplementation(() => {});
+
+    await mgr.runStreamableHttp(createMockServer(), { host: "127.0.0.1", port: 0 });
+    const addr = mgr.httpServer!.address() as AddressInfo;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/usage`);
+    expect(res.status).toBe(200);
+  });
+});
