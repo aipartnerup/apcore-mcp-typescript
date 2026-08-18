@@ -714,7 +714,7 @@ export async function serve(
   if (explorer && (transportLower === "streamable-http" || transportLower === "sse")) {
     // Build auth hook for POST (tool execution) calls
     const authHook = authenticator
-      ? buildExplorerAuthHook(authenticator)
+      ? buildExplorerAuthHook(authenticator, { requireAuth })
       : undefined;
 
     const explorerNodeHandler = createNodeHandler(
@@ -996,7 +996,7 @@ export async function asyncServe(
   // Mount explorer
   if (explorer) {
     const authHook = authenticator
-      ? buildExplorerAuthHook(authenticator)
+      ? buildExplorerAuthHook(authenticator, { requireAuth })
       : undefined;
 
     const explorerNodeHandler = createNodeHandler(

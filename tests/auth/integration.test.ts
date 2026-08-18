@@ -13,6 +13,7 @@ import { createNodeHandler, type Tool as UITool } from "mcp-embedded-ui";
 import { TransportManager } from "../../src/server/transport.js";
 import { JWTAuthenticator } from "../../src/auth/jwt.js";
 import { buildExplorerAuthHook } from "../../src/auth/hooks.js";
+import { getCurrentIdentity } from "../../src/auth/storage.js";
 import type { ExecutionRouter } from "../../src/server/router.js";
 import type { TextContentDict } from "../../src/types.js";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -674,5 +675,66 @@ describe("/usage endpoint authentication", () => {
 
     const res = await fetch(`http://127.0.0.1:${addr.port}/usage`);
     expect(res.status).toBe(200);
+  });
+});
+
+describe("buildExplorerAuthHook requireAuth policy", () => {
+  // Python (middleware.py:92) and Rust (middleware.rs:194) both let an
+  // unauthenticated request through when require_auth is off; the hook used to
+  // throw unconditionally, making permissive mode unreachable in TypeScript.
+  const noHeaders = { headers: {} };
+  const ok = () => Promise.resolve(new Response("ok"));
+
+  it("proceeds with a null identity when the authenticator is permissive", async () => {
+    const hook = buildExplorerAuthHook(
+      new JWTAuthenticator({ secret: SECRET, requireAuth: false }),
+    );
+
+    let seen: unknown = "unset";
+    const res = await hook(noHeaders, () => {
+      seen = getCurrentIdentity();
+      return ok();
+    });
+
+    expect(res.status).toBe(200);
+    expect(seen).toBeNull();
+  });
+
+  it("still rejects unauthenticated requests by default", async () => {
+    const hook = buildExplorerAuthHook(new JWTAuthenticator({ secret: SECRET }));
+
+    await expect(hook(noHeaders, ok)).rejects.toThrow("Unauthorized");
+  });
+
+  it("still authenticates a valid token in permissive mode", async () => {
+    const hook = buildExplorerAuthHook(
+      new JWTAuthenticator({ secret: SECRET, requireAuth: false }),
+    );
+
+    let seen: { id?: string } | null = null;
+    await hook(
+      { headers: { authorization: `Bearer ${signToken({ sub: "user-9" })}` } },
+      () => {
+        seen = getCurrentIdentity() as { id?: string } | null;
+        return ok();
+      },
+    );
+
+    expect(seen).not.toBeNull();
+    expect(seen!.id).toBe("user-9");
+  });
+
+  it("honours an explicit requireAuth override over the authenticator", async () => {
+    const strict = buildExplorerAuthHook(
+      new JWTAuthenticator({ secret: SECRET, requireAuth: false }),
+      { requireAuth: true },
+    );
+    await expect(strict(noHeaders, ok)).rejects.toThrow("Unauthorized");
+
+    const permissive = buildExplorerAuthHook(
+      new JWTAuthenticator({ secret: SECRET, requireAuth: true }),
+      { requireAuth: false },
+    );
+    await expect(permissive(noHeaders, ok)).resolves.toBeDefined();
   });
 });
