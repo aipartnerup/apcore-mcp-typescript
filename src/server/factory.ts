@@ -79,6 +79,7 @@ export class MCPServerFactory {
   constructor(options: MCPServerFactoryOptions = {}) {
     this._schemaConverter = new SchemaConverter();
     this._annotationMapper = new AnnotationMapper();
+    
     this._richDescription = options.richDescription ?? false;
   }
 
