@@ -21,8 +21,8 @@ importers:
         specifier: '>=9.0.3'
         version: 9.0.3
       mcp-embedded-ui:
-        specifier: '>=0.4.0'
-        version: 0.4.0
+        specifier: '>=0.5.0'
+        version: 0.5.0
     devDependencies:
       '@eslint/js':
         specifier: ^9.0.0
@@ -1341,8 +1341,8 @@ packages:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
 
-  mcp-embedded-ui@0.4.0:
-    resolution: {integrity: sha512-T94XxjoCWIIg2Ohy7jcXPC/E3/CpqafdliDzsIr6uA9ePes7leTudHZrXyaDvmzL/ehIIRt4NIgl/A+twEuJ9g==}
+  mcp-embedded-ui@0.5.0:
+    resolution: {integrity: sha512-3+0DY1j1Xll37S98XK0aM5ss2Gc92cmdE9PjVruOVHgeN38blCJjL+D/OQJjaeJ3MNbbJQS8ofgXOYXsK7QR4g==}
     engines: {node: '>=18.0.0'}
 
   media-typer@1.1.0:
@@ -2979,7 +2979,7 @@ snapshots:
 
   math-intrinsics@1.1.0: {}
 
-  mcp-embedded-ui@0.4.0:
+  mcp-embedded-ui@0.5.0:
     dependencies:
       ajv: 8.18.0
       ajv-formats: 3.0.1(ajv@8.18.0)

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.18.1] - 2026-08-20
+
+Patch release. Bumps the required `mcp-embedded-ui` floor to `>=0.5.0` (was `>=0.4.0`). No `apcore-mcp` code changes — `createNodeHandler` is called exactly as before. All 676 tests pass unmodified against mcp-embedded-ui 0.5.0.
+
+### Changed
+
+- **Required `mcp-embedded-ui` floor raised to `>=0.5.0`.** A consumer who mounts the Explorer inherits mcp-embedded-ui 0.5.0's Try-It editor prefill change (spec F6/FR-1): the prefill now emits only the keys listed in `inputSchema.required`, using each property's declared `default` when present and `null` otherwise, instead of inventing a type-based value (`""`, `0`, ...) for every property.
+
+### Fixed
+
+- Inherited from mcp-embedded-ui 0.5.0: `/validate` (F7) no longer returns HTTP 500 for a tool whose `inputSchema` cannot be compiled — it now reports a single `keyword: "schema"` validation failure at HTTP 200.
+- Inherited from mcp-embedded-ui 0.5.0: `project_url` is now scheme-checked (`http://`, `https://`, `mailto:`, or a leading `/`) before being placed in `href` on the Explorer page.
+
 ## [0.18.0] - 2026-08-19
 
 ### Security
