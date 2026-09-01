@@ -5,6 +5,7 @@ import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListResourceTemplatesRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ModuleDescriptor, Registry } from "../../src/types.js";
 
@@ -732,5 +733,459 @@ describe("MCPServerFactory richDescription", () => {
     const descriptor = makeDescriptor({ description: "Plain text" });
     const tool = factory.buildTool(descriptor);
     expect(tool.description).toBe("Plain text");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aiperceivable/apcore-mcp#15(a) / apcore-mcp-typescript#9: system.* modules
+// are projected as resources (read) / tools (write), not all as tools.
+// ---------------------------------------------------------------------------
+
+describe("buildTools() excludes read-only system.* management modules", () => {
+  const factory = new MCPServerFactory();
+
+  it("excludes system.health.*, system.usage.*, system.manifest.* but keeps system.control.*", () => {
+    const registry = createMockRegistry({
+      "system.health.summary": makeDescriptor({ moduleId: "system.health.summary" }),
+      "system.health.module": makeDescriptor({ moduleId: "system.health.module" }),
+      "system.usage.summary": makeDescriptor({ moduleId: "system.usage.summary" }),
+      "system.usage.module": makeDescriptor({ moduleId: "system.usage.module" }),
+      "system.manifest.full": makeDescriptor({ moduleId: "system.manifest.full" }),
+      "system.manifest.module": makeDescriptor({ moduleId: "system.manifest.module" }),
+      "system.control.update_config": makeDescriptor({ moduleId: "system.control.update_config" }),
+      "system.control.reload_module": makeDescriptor({ moduleId: "system.control.reload_module" }),
+      "system.control.toggle_feature": makeDescriptor({ moduleId: "system.control.toggle_feature" }),
+      "text.analyze": makeDescriptor({ moduleId: "text.analyze" }),
+    });
+
+    const tools = factory.buildTools(registry);
+    const names = tools.map((t) => t.name).sort();
+
+    expect(names).toEqual(
+      [
+        "system.control.update_config",
+        "system.control.reload_module",
+        "system.control.toggle_feature",
+        "text.analyze",
+      ].sort(),
+    );
+  });
+
+  it("with sys_modules disabled (nothing registered), tools/list has no system.* at all", () => {
+    const registry = createMockRegistry({
+      "text.analyze": makeDescriptor({ moduleId: "text.analyze" }),
+    });
+    const tools = factory.buildTools(registry);
+    expect(tools.map((t) => t.name)).toEqual(["text.analyze"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aiperceivable/apcore-mcp#16 phase A: com.aiperceivable/management extension
+// ---------------------------------------------------------------------------
+
+describe("createServer() management extension capability", () => {
+  const factory = new MCPServerFactory();
+
+  it("advertises no extensions field when managementSurfaces is omitted", () => {
+    const server = factory.createServer("test", "1.0.0");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.extensions).toBeUndefined();
+  });
+
+  it("advertises no extensions field when all surfaces are false", () => {
+    const server = factory.createServer("test", "1.0.0", {
+      health: false,
+      usage: false,
+      manifest: false,
+      control: false,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.extensions).toBeUndefined();
+  });
+
+  it("advertises com.aiperceivable/management with only the true surfaces listed", () => {
+    const server = factory.createServer("test", "1.0.0", {
+      health: true,
+      usage: false,
+      manifest: true,
+      control: false,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.extensions).toBeDefined();
+    const ext = caps.extensions["com.aiperceivable/management"];
+    expect(ext.surfaces).toEqual(["health", "manifest"]);
+    expect(typeof ext.protocolVersion).toBe("string");
+    expect(ext.protocolVersion.length).toBeGreaterThan(0);
+  });
+
+  it("advertises all four surfaces when all are true", () => {
+    const server = factory.createServer("test", "1.0.0", {
+      health: true,
+      usage: true,
+      manifest: true,
+      control: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.extensions["com.aiperceivable/management"].surfaces).toEqual([
+      "health",
+      "usage",
+      "manifest",
+      "control",
+    ]);
+  });
+
+  it("still sets tools/resources capabilities unchanged regardless of managementSurfaces", () => {
+    const server = factory.createServer("test", "1.0.0", { health: true, usage: false, manifest: false, control: false });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.tools).toEqual({ listChanged: true });
+    expect(caps.resources).toEqual({ listChanged: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aiperceivable/apcore-mcp-typescript#9: registerResourceHandlers() serves
+// the system.* management surface as resources/resource-templates, dispatched
+// through the ExecutionRouter (never bypassing ACL/approval/audit).
+// ---------------------------------------------------------------------------
+
+describe("registerResourceHandlers() system.* management surface", () => {
+  function setup(registeredModuleIds: string[]) {
+    const descriptors: Record<string, ModuleDescriptor> = {};
+    for (const id of registeredModuleIds) {
+      descriptors[id] = makeDescriptor({ moduleId: id });
+    }
+    const registry = createMockRegistry(descriptors);
+
+    const handlers = new Map<unknown, Function>();
+    const mockServer = {
+      setRequestHandler: (schema: unknown, handler: Function) => {
+        handlers.set(schema, handler);
+      },
+    };
+
+    const mockRouter = {
+      handleCall: vi.fn().mockResolvedValue([
+        [{ type: "text", text: '{"status":"ok"}' }],
+        false,
+        undefined,
+      ]),
+    };
+
+    return { registry, handlers, mockServer, mockRouter };
+  }
+
+  const ALL_SYSTEM_READ_IDS = [
+    "system.health.summary",
+    "system.health.module",
+    "system.usage.summary",
+    "system.usage.module",
+    "system.manifest.full",
+    "system.manifest.module",
+  ];
+
+  it("lists the three static system resources alongside docs:// resources", async () => {
+    const descriptors: Record<string, ModuleDescriptor> = {};
+    for (const id of ALL_SYSTEM_READ_IDS) {
+      descriptors[id] = makeDescriptor({ moduleId: id });
+    }
+    descriptors["mod.documented"] = makeDescriptor({
+      moduleId: "mod.documented",
+      documentation: "docs",
+    });
+    const registry = createMockRegistry(descriptors);
+    const handlers = new Map<unknown, Function>();
+    const mockServer = {
+      setRequestHandler: (schema: unknown, handler: Function) => {
+        handlers.set(schema, handler);
+      },
+    };
+    const mockRouter = {
+      handleCall: vi.fn().mockResolvedValue([
+        [{ type: "text", text: '{"status":"ok"}' }],
+        false,
+        undefined,
+      ]),
+    };
+
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const listHandler = handlers.get(ListResourcesRequestSchema)!;
+    const result = await listHandler({});
+    const uris = result.resources.map((r: { uri: string }) => r.uri).sort();
+
+    expect(uris).toEqual(
+      [
+        "docs://mod.documented",
+        "apcore://system.health.summary",
+        "apcore://system.usage.summary",
+        "apcore://system.manifest.full",
+      ].sort(),
+    );
+    const staticEntry = result.resources.find(
+      (r: { uri: string }) => r.uri === "apcore://system.health.summary",
+    );
+    expect(staticEntry.mimeType).toBe("application/json");
+  });
+
+  it("registers resources/templates/list only when at least one template module is present", async () => {
+    const withTemplates = setup(ALL_SYSTEM_READ_IDS);
+    const factory1 = new MCPServerFactory();
+    factory1.registerResourceHandlers(withTemplates.mockServer as any, withTemplates.registry, withTemplates.mockRouter as any);
+    const templatesHandler = withTemplates.handlers.get(ListResourceTemplatesRequestSchema);
+    expect(templatesHandler).toBeDefined();
+    const result = await templatesHandler!({});
+    const templates = result.resourceTemplates.map((t: { uriTemplate: string }) => t.uriTemplate).sort();
+    expect(templates).toEqual(
+      [
+        "apcore://system.health.module/{module_id}",
+        "apcore://system.manifest.module/{module_id}",
+        "apcore://system.usage.module/{module_id}{?period}",
+      ].sort(),
+    );
+
+    const withoutSystemModules = setup(["mod.plain"]);
+    const factory2 = new MCPServerFactory();
+    factory2.registerResourceHandlers(
+      withoutSystemModules.mockServer as any,
+      withoutSystemModules.registry,
+      withoutSystemModules.mockRouter as any,
+    );
+    expect(withoutSystemModules.handlers.get(ListResourceTemplatesRequestSchema)).toBeUndefined();
+  });
+
+  it("with sys_modules disabled (nothing registered), neither resources/list nor templates contains system.*", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(["mod.plain"]);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const listHandler = handlers.get(ListResourcesRequestSchema)!;
+    const result = await listHandler({});
+    expect(result.resources.some((r: { uri: string }) => r.uri.includes("system."))).toBe(false);
+    expect(handlers.get(ListResourceTemplatesRequestSchema)).toBeUndefined();
+  });
+
+  it("resources/read for a static resource dispatches through router.handleCall with {} args", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    const result = await readHandler({ params: { uri: "apcore://system.health.summary" } });
+
+    expect(mockRouter.handleCall).toHaveBeenCalledWith(
+      "system.health.summary",
+      {},
+      expect.anything(),
+    );
+    expect(result.contents).toEqual([
+      { uri: "apcore://system.health.summary", text: '{"status":"ok"}', mimeType: "application/json" },
+    ]);
+  });
+
+  it("resources/read for a static resource forwards a query parameter (period)", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await readHandler({ params: { uri: "apcore://system.usage.summary?period=24h" } });
+
+    expect(mockRouter.handleCall).toHaveBeenCalledWith(
+      "system.usage.summary",
+      { period: "24h" },
+      expect.anything(),
+    );
+  });
+
+  it("resources/read for a template resource extracts module_id from the path", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await readHandler({ params: { uri: "apcore://system.health.module/text.analyze" } });
+
+    expect(mockRouter.handleCall).toHaveBeenCalledWith(
+      "system.health.module",
+      { module_id: "text.analyze" },
+      expect.anything(),
+    );
+  });
+
+  it("resources/read for system.usage.module combines module_id and period", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await readHandler({
+      params: { uri: "apcore://system.usage.module/text.analyze?period=7d" },
+    });
+
+    expect(mockRouter.handleCall).toHaveBeenCalledWith(
+      "system.usage.module",
+      { module_id: "text.analyze", period: "7d" },
+      expect.anything(),
+    );
+  });
+
+  it("resources/read throws for an unregistered system.* module id", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(["system.health.summary"]);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.usage.summary" } }),
+    ).rejects.toThrow(/Resource not found/);
+  });
+
+  it("resources/read throws when a template module is read without its module_id segment", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.health.module" } }),
+    ).rejects.toThrow(/missing the required "module_id"/);
+  });
+
+  it("resources/read throws when a static module is read with an unsupported module_id segment", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.health.summary/oops" } }),
+    ).rejects.toThrow(/does not accept a module_id/);
+  });
+
+  it("resources/read throws for an unsupported query parameter", async () => {
+    const { registry, handlers, mockServer, mockRouter } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.health.summary?bogus=1" } }),
+    ).rejects.toThrow(/unsupported parameter/);
+  });
+
+  it("resources/read throws a clear error when no router was supplied", async () => {
+    const { registry, handlers, mockServer } = setup(ALL_SYSTEM_READ_IDS);
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry); // no router
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.health.summary" } }),
+    ).rejects.toThrow(/was not given an ExecutionRouter/);
+  });
+
+  it("surfaces an ACL-denied router result as a thrown MCP error (never bypasses the router)", async () => {
+    const { registry, handlers, mockServer } = setup(ALL_SYSTEM_READ_IDS);
+    const denyingRouter = {
+      handleCall: vi.fn().mockResolvedValue([
+        [{ type: "text", text: "ACL denied: caller not authorized" }],
+        true,
+        undefined,
+      ]),
+    };
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry, denyingRouter as any);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    await expect(
+      readHandler({ params: { uri: "apcore://system.health.summary" } }),
+    ).rejects.toThrow(/ACL denied/);
+    expect(denyingRouter.handleCall).toHaveBeenCalled();
+  });
+
+  it("docs:// resources keep working unchanged alongside the system.* handler", async () => {
+    const descriptors: Record<string, ModuleDescriptor> = {
+      "mod.documented": makeDescriptor({ moduleId: "mod.documented", documentation: "Some docs" }),
+    };
+    const registry = createMockRegistry(descriptors);
+    const handlers = new Map<unknown, Function>();
+    const mockServer = {
+      setRequestHandler: (schema: unknown, handler: Function) => handlers.set(schema, handler),
+    };
+    const factory = new MCPServerFactory();
+    factory.registerResourceHandlers(mockServer as any, registry);
+
+    const readHandler = handlers.get(ReadResourceRequestSchema)!;
+    const result = await readHandler({ params: { uri: "docs://mod.documented" } });
+    expect(result.contents[0].text).toBe("Some docs");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aiperceivable/apcore-mcp#16 phase A acceptance: a client that does not
+// declare/inspect the extension still reaches every tool and resource.
+// ---------------------------------------------------------------------------
+
+describe("extension-unaware client still reaches tools and resources (#16 regression)", () => {
+  it("tools/list, tools/call, resources/list and resources/read all work when the client never looks at capabilities.extensions", async () => {
+    const descriptor = makeDescriptor({ moduleId: "system.control.reload_module" });
+    const registry = createMockRegistry({
+      "system.health.summary": makeDescriptor({ moduleId: "system.health.summary" }),
+      "system.control.reload_module": descriptor,
+    });
+
+    const factory = new MCPServerFactory();
+    // The server advertises the extension...
+    const server = factory.createServer("test", "1.0.0", {
+      health: true,
+      usage: false,
+      manifest: false,
+      control: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const caps = (server as any).getCapabilities?.() ?? (server as any)._capabilities;
+    expect(caps.extensions).toBeDefined();
+
+    // ...but a client that never reads `caps.extensions` still reaches
+    // everything through the ordinary primitives.
+    const tools = factory.buildTools(registry);
+    const handlers = new Map<unknown, Function>();
+    const mockServer = {
+      setRequestHandler: (schema: unknown, handler: Function) => handlers.set(schema, handler),
+    };
+    const mockRouter = {
+      handleCall: vi.fn().mockResolvedValue([
+        [{ type: "text", text: '{"ok":true}' }],
+        false,
+        undefined,
+      ]),
+    };
+    factory.registerHandlers(mockServer as any, tools, mockRouter as any);
+    factory.registerResourceHandlers(mockServer as any, registry, mockRouter as any);
+
+    const toolsList = await handlers.get(ListToolsRequestSchema)!({});
+    expect(toolsList.tools.map((t: { name: string }) => t.name)).toEqual([
+      "system.control.reload_module",
+    ]);
+
+    const callResult = await handlers.get(CallToolRequestSchema)!({
+      params: { name: "system.control.reload_module", arguments: {} },
+    });
+    expect(callResult.content[0].text).toBe('{"ok":true}');
+
+    const resourcesList = await handlers.get(ListResourcesRequestSchema)!({});
+    expect(resourcesList.resources.some((r: { uri: string }) => r.uri === "apcore://system.health.summary")).toBe(true);
+
+    const readResult = await handlers.get(ReadResourceRequestSchema)!({
+      params: { uri: "apcore://system.health.summary" },
+    });
+    expect(readResult.contents[0].text).toBe('{"ok":true}');
   });
 });

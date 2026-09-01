@@ -6,6 +6,105 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.19.0] - 2026-09-01
+
+`system.*` management surface correctness and governance-transparency release.
+Fixes aiperceivable/apcore-mcp#14, #15, and #16 (phase A) —
+aiperceivable/apcore-mcp-typescript#9 is the implementation issue for this
+repository. Bumps the required `apcore-js` floor to `0.28.0` and
+`apcore-toolkit` floor to `0.10.2`.
+
+### Security
+
+- **Read-only `system.*` management modules are no longer projected as MCP
+  tools.** `system.health.*`, `system.usage.*`, and `system.manifest.*` were
+  built into `tools/list` by `buildTools()` like any other module — with
+  `sys_modules.enabled = true`, six management tools entered the agent's
+  tool-selection space, which PROTOCOL_SPEC §6.6.2 classifies as
+  Observability/Introspection resources, not tools. They are now served
+  exclusively via `resources/read`: the three parameterless modules as
+  static resources (`apcore://system.health.summary`,
+  `apcore://system.usage.summary{?period}`, `apcore://system.manifest.full`)
+  and the three per-module modules as resource templates
+  (`apcore://system.{health,manifest,usage}.module/{module_id}{?period}`).
+  `system.control.*` write modules are unaffected — they stay tools, gated
+  by ACL and approval exactly as before. Every management resource read is
+  dispatched through the same `ExecutionRouter.handleCall()` pipeline as
+  `tools/call`, so ACL, approval, audit, and redaction all apply identically
+  — resources are never read by calling a module or collector directly.
+  (aiperceivable/apcore-mcp#15(a), aiperceivable/apcore-mcp-typescript#9)
+- **New startup warning for an unprotected `system.control.*` surface.**
+  `serve()` / `asyncServe()` now call the new `Executor.governanceState()`
+  (apcore-js 0.28.0) right after the executor is fully wired and print a
+  prominent, multi-line warning — naming exactly which of ACL / built-in ACL
+  gate / approval handler / built-in approval gate / per-module
+  `requiresApproval` is missing, plus the concrete configuration that closes
+  each gap — whenever `system.control.*` is registered and reachable with no
+  recognised gate in front of it. This is a warning only; it never blocks
+  startup, and it is printed via the pre-suppression `console.warn` so
+  `mcp.log_level` cannot silence it. (aiperceivable/apcore-mcp#15(b))
+- **The ACL rule template in `src/acl-builder.ts` documented a `sys.*`
+  namespace that does not exist**, so a rule copied from it silently never
+  matched anything — a copied **deny** rule left the management surface
+  completely open while the operator believed it was blocked. Replaced with
+  the real `system.*` module ids and a complete, copy-pasteable three-rule
+  template (read access, administration, catch-all deny), plus the two
+  mechanism notes it depends on (MCP callers always normalise to
+  `@external`; console-vs-agent separation must go through `conditions`
+  reading JWT-derived `identity_types`/`roles`). A new test asserts every
+  `targets` pattern in the shipped template matches at least one module id
+  a real `registerSysModules()` call actually registers.
+  (aiperceivable/apcore-mcp#14)
+
+### Added
+
+- **`com.aiperceivable/management` MCP extension (SEP-2133, phase A).**
+  `MCPServerFactory.createServer()` takes an optional third
+  `managementSurfaces` argument (`{ health, usage, manifest, control }`) and,
+  when at least one is `true`, advertises the extension in the `initialize`
+  response's `capabilities.extensions`, listing only the surfaces actually
+  registered, alongside the current PROTOCOL_SPEC version. `serve()` /
+  `asyncServe()` compute this from the registry automatically. The extension
+  is metadata only — a client that never inspects
+  `capabilities.extensions` still reaches every management resource and tool
+  through ordinary `resources/read` / `tools/call`, subject only to ACL and
+  approval; a regression test asserts this explicitly.
+  (aiperceivable/apcore-mcp#16 phase A)
+- `AclConfigRule.approval` — Config Bus `mcp.acl` rules may now carry
+  `approval: "required"` (apcore 0.28.0 argument-scoped approval,
+  PROTOCOL_SPEC §6.1.6). Previously any rule with this key was rejected
+  outright by the "unknown rule key" check; the value is now accepted and
+  passed through to `new ACL()`, which performs the authoritative
+  validation.
+- README: documents that enabling `sys_modules.enabled` without configuring
+  an `acl/` directory leaves the entire management surface — including
+  `system.control.*` — with no authorization (`ACL.discover()` returns
+  `null` on a missing path, identical to never configuring an ACL at all).
+
+### Changed
+
+- Required `apcore-js` floor raised to `>=0.28.0` (adds
+  `Executor.governanceState()`, consumed by the new startup warning above).
+- Required `apcore-toolkit` floor raised to `>=0.10.2`. Per the toolkit's own
+  changelog, 0.10.2 is scoped entirely to the ACL/Executor governance layer
+  and touches nothing this package consumes (`formatModule`, `Registry`,
+  annotations); no code changes were needed in `src/markdown.ts` or
+  elsewhere, and the full suite passes unmodified against both new floors.
+
+### Tests
+
+- New `tests/system-surface-conformance.test.ts`: drives the shared
+  `apcore-mcp/conformance/fixtures/system_surface.json` fixture — built from
+  a real `apcore-js` `registerSysModules()` call — through `buildTools()` /
+  `registerResourceHandlers()`, asserting the resulting tool names, resource
+  URIs and resource-template URIs match byte-for-byte. The Python and Rust
+  bridges run the identical fixture; this is what caught both of them
+  missing the `{?period}` RFC 6570 query-expansion suffix on
+  `system.usage.module`'s template — `systemResourceUriTemplate()` here
+  already had it right (aiperceivable/apcore-mcp#15's cross-language parity
+  acceptance criterion, now a regression test instead of a one-time manual
+  check).
+
 ## [0.18.1] - 2026-08-20
 
 Patch release. Bumps the required `mcp-embedded-ui` floor to `>=0.5.0` (was `>=0.4.0`). No `apcore-mcp` code changes — `createNodeHandler` is called exactly as before. All 676 tests pass unmodified against mcp-embedded-ui 0.5.0.

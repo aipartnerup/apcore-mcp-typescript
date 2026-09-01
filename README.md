@@ -323,7 +323,7 @@ function serve(
 
 *Executor wiring*
 - `middleware` — Array of apcore `Middleware` instances installed via `executor.use()`. Appended to any middleware declared under Config Bus key `mcp.middleware`
-- `acl` — Optional apcore `ACL` instance installed via `executor.setAcl()`. Caller-supplied ACL takes precedence over `mcp.acl` Config Bus entry
+- `acl` — Optional apcore `ACL` instance installed via `executor.setAcl()`. Caller-supplied ACL takes precedence over `mcp.acl` Config Bus entry. **If `sys_modules.enabled` is turned on with no `acl/` directory configured, `ACL.discover()` returns `null` — identical to a project that never configured an ACL — and the entire `system.*` management surface (including `system.control.*`) is reachable with no authorization.** See `src/acl-builder.ts` for a copy-pasteable rule template that gates it correctly.
 - `approvalHandler` — Optional approval handler passed to the Executor (e.g. `ElicitationApprovalHandler`)
 - `strategy` — Execution strategy name passed to the Executor (e.g. `"standard"`, `"internal"`)
 

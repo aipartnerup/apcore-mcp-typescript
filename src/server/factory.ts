@@ -13,11 +13,13 @@ import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListResourceTemplatesRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type {
   Tool,
   CallToolResult,
   Resource,
+  ResourceTemplate,
   ReadResourceResult,
 } from "@modelcontextprotocol/sdk/types.js";
 
@@ -34,9 +36,34 @@ import {
   primeMarkdownToolkit,
   renderModuleMarkdownSync,
 } from "../markdown.js";
+import {
+  isSystemReadModule,
+  parseSystemResourceUri,
+  systemResourceAcceptsQueryParam,
+  systemResourceUri,
+  systemResourceUriTemplate,
+  SYSTEM_STATIC_RESOURCE_MODULES,
+  SYSTEM_TEMPLATE_RESOURCE_MODULES,
+} from "./system-surface.js";
+import type { ManagementSurfaces } from "./system-surface.js";
+export type { ManagementSurfaces } from "./system-surface.js";
 
 /** Metadata keys for AI intent annotations appended to tool descriptions. */
 const AI_INTENT_KEYS = ["x-when-to-use", "x-when-not-to-use", "x-common-mistakes", "x-workflow-hints"] as const;
+
+/**
+ * Vendor identifier for the `system.*` management-surface MCP extension
+ * (aiperceivable/apcore-mcp#16, phase A — SEP-2133 unofficial extension).
+ * Stable from first publication per SEP-2133.
+ */
+const MANAGEMENT_EXTENSION_ID = "com.aiperceivable/management";
+
+/**
+ * PROTOCOL_SPEC version advertised alongside the management extension.
+ * Sourced from `apcore/PROTOCOL_SPEC.md` ("> Version: 1.30.0") at the time
+ * this was written — update alongside that document.
+ */
+const MANAGEMENT_EXTENSION_PROTOCOL_VERSION = "1.30.0";
 
 /** Options for filtering when building tools from a registry. */
 export interface BuildToolsOptions {
@@ -111,6 +138,7 @@ export class MCPServerFactory {
   createServer(
     name: string = "apcore-mcp",
     version: string = "0.1.0",
+    managementSurfaces?: ManagementSurfaces | null,
   ): Server {
     // [D10-002] Cross-language parity: the spec mandates a non-empty name
     // no longer than 255 chars. Python and Rust both throw on violation
@@ -126,15 +154,38 @@ export class MCPServerFactory {
     // Rust's MCPServerFactory::build_init_options both set this to true;
     // the TS factory previously passed empty objects, breaking dynamic-tool
     // registration on TS-hosted servers. [A-D-004]
-    return new Server(
-      { name, version },
-      {
-        capabilities: {
-          tools: { listChanged: true },
-          resources: { listChanged: true },
-        },
-      },
-    );
+    const capabilities: {
+      tools: { listChanged: boolean };
+      resources: { listChanged: boolean };
+      extensions?: Record<string, unknown>;
+    } = {
+      tools: { listChanged: true },
+      resources: { listChanged: true },
+    };
+
+    // aiperceivable/apcore-mcp#16 phase A: advertise the unofficial
+    // `com.aiperceivable/management` extension (SEP-2133) ONLY when at
+    // least one management surface is actually reachable. `surfaces` lists
+    // only the ones that are true — a server MUST NOT advertise a surface
+    // with nothing registered under it. This is metadata only: a client
+    // that ignores it still reaches every management resource/tool through
+    // ordinary `resources/read` / `tools/call`, subject only to ACL and
+    // approval (the extension is not a gate — PROTOCOL_SPEC §6.6.3).
+    if (managementSurfaces) {
+      const surfaces = (
+        ["health", "usage", "manifest", "control"] as const
+      ).filter((key) => managementSurfaces[key]);
+      if (surfaces.length > 0) {
+        capabilities.extensions = {
+          [MANAGEMENT_EXTENSION_ID]: {
+            surfaces,
+            protocolVersion: MANAGEMENT_EXTENSION_PROTOCOL_VERSION,
+          },
+        };
+      }
+    }
+
+    return new Server({ name, version }, { capabilities });
   }
 
   /**
@@ -279,6 +330,13 @@ export class MCPServerFactory {
    *
    * Reserved: module ids starting with `__apcore_` collide with the async
    * task bridge meta-tool namespace and are rejected with a console.error.
+   *
+   * Read-only `system.*` management modules (`system.health.*`,
+   * `system.usage.*`, `system.manifest.*`) are excluded — PROTOCOL_SPEC
+   * §6.6.2 classifies them as Observability/Introspection resources, not
+   * tools (aiperceivable/apcore-mcp#15). They are served instead via
+   * {@link registerResourceHandlers}. `system.control.*` write modules are
+   * unaffected and still become tools.
    */
   buildTools(registry: Registry, options?: BuildToolsOptions): Tool[] {
     const tools: Tool[] = [];
@@ -288,6 +346,9 @@ export class MCPServerFactory {
     });
 
     for (const moduleId of moduleIds) {
+      if (isSystemReadModule(moduleId)) {
+        continue;
+      }
       if (moduleId.startsWith(APCORE_META_TOOL_PREFIX)) {
         throw new Error(
           `Reserved module id "${moduleId}" — ids prefixed with ` +
@@ -335,19 +396,37 @@ export class MCPServerFactory {
   }
 
   /**
-   * Register resources/list and resources/read handlers for modules with documentation.
+   * Register resources/list, resources/templates/list, and resources/read
+   * handlers for both documented modules and the `system.*` management
+   * surface.
    *
-   * Iterates over registry.list(), gets each definition, and filters for
-   * descriptors that have a non-null `documentation` field. Registers:
-   * - resources/list: returns Resource objects with URI docs://{module_id}
-   * - resources/read: returns documentation text for the requested module
+   * - resources/list: `docs://{module_id}` for every module with a
+   *   non-null `documentation` field, PLUS `apcore://{module_id}` for the
+   *   three parameterless read-only management modules
+   *   ({@link SYSTEM_STATIC_RESOURCE_MODULES}) — only when registered.
+   * - resources/templates/list: `apcore://{module_id}/{module_id_param}`
+   *   for the three per-module read-only management modules
+   *   ({@link SYSTEM_TEMPLATE_RESOURCE_MODULES}) — only when registered,
+   *   and only registered at all when at least one is present.
+   * - resources/read: dispatches `docs://` by static lookup (unchanged),
+   *   and `apcore://` management URIs by parsing the module id + params
+   *   ({@link parseSystemResourceUri}) and calling `router.handleCall()` —
+   *   the SAME ACL/approval/audit pipeline as `tools/call`. Management
+   *   resources are NEVER read by calling the module or a collector
+   *   directly (aiperceivable/apcore-mcp-typescript#9): that would bypass
+   *   ACL, approval and audit.
    *
    * @param server - The MCP Server to register handlers on
-   * @param registry - Registry to discover modules with documentation
+   * @param registry - Registry to discover modules with documentation and
+   *   management modules
+   * @param router - Required to serve `apcore://system.*` resources (they
+   *   are module invocations); omit only when no `system.*` read module is
+   *   registered — attempting to read one without a router throws.
    */
   registerResourceHandlers(
     server: Server,
     registry: Registry,
+    router?: ExecutionRouter,
   ): void {
     // Build a map of module_id -> documentation for modules with docs
     const docsMap = new Map<string, string>();
@@ -364,6 +443,21 @@ export class MCPServerFactory {
       }
     }
 
+    // `system.*` management surface — classification is by module_id
+    // presence in the registry ONLY (no separate switch/env var), matching
+    // isSystemReadModule()'s prefix-only classification. A module id is
+    // included here iff registry.list() actually returned it, so
+    // `sys_modules.enabled = false` (nothing registered) yields none of
+    // this, exactly like the docs:// resources above.
+    const registeredIds = new Set(moduleIds);
+    const staticResourceIds: string[] = SYSTEM_STATIC_RESOURCE_MODULES.filter((id) =>
+      registeredIds.has(id),
+    );
+    const templateResourceIds: string[] = SYSTEM_TEMPLATE_RESOURCE_MODULES.filter((id) =>
+      registeredIds.has(id),
+    );
+    const allSystemResourceIds = new Set<string>([...staticResourceIds, ...templateResourceIds]);
+
     // Handle resources/list requests
     server.setRequestHandler(ListResourcesRequestSchema, async () => {
       const resources: Resource[] = [];
@@ -374,12 +468,107 @@ export class MCPServerFactory {
           mimeType: "text/plain",
         });
       }
+      for (const moduleId of staticResourceIds) {
+        resources.push({
+          uri: systemResourceUri(moduleId),
+          name: moduleId,
+          mimeType: "application/json",
+        });
+      }
       return { resources };
     });
 
+    // Handle resources/templates/list requests — only registered when at
+    // least one per-module management module is present, so a client that
+    // never enables system modules sees no templates capability surprise.
+    if (templateResourceIds.length > 0) {
+      server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+        const resourceTemplates: ResourceTemplate[] = templateResourceIds.map((moduleId) => ({
+          uriTemplate: systemResourceUriTemplate(moduleId),
+          name: moduleId,
+          mimeType: "application/json",
+        }));
+        return { resourceTemplates };
+      });
+    }
+
     // Handle resources/read requests
-    server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    server.setRequestHandler(ReadResourceRequestSchema, async (request, extra) => {
       const uri = request.params.uri;
+
+      // apcore://system.* management resources — dispatch through the
+      // ExecutionRouter so ACL, approval, audit events, and redaction all
+      // apply exactly as they do for tools/call.
+      const parsed = parseSystemResourceUri(uri);
+      if (parsed !== null) {
+        if (!allSystemResourceIds.has(parsed.moduleId)) {
+          throw new Error(`Resource not found: ${uri}`);
+        }
+        if (!router) {
+          throw new Error(
+            `Cannot read management resource "${uri}": registerResourceHandlers() ` +
+              "was not given an ExecutionRouter.",
+          );
+        }
+
+        const isTemplateModule = templateResourceIds.includes(parsed.moduleId);
+        const hasModuleIdParam = typeof parsed.args.module_id === "string";
+        if (isTemplateModule && !hasModuleIdParam) {
+          throw new Error(
+            `Resource URI "${uri}" is missing the required "module_id" path segment`,
+          );
+        }
+        if (!isTemplateModule && hasModuleIdParam) {
+          throw new Error(`Resource URI "${uri}" does not accept a module_id path segment`);
+        }
+        const unsupportedParams = Object.keys(parsed.args).filter((key) => {
+          if (key === "module_id") return false;
+          return !systemResourceAcceptsQueryParam(parsed.moduleId, key);
+        });
+        if (unsupportedParams.length > 0) {
+          throw new Error(
+            `Resource URI "${uri}" has unsupported parameter(s): ${unsupportedParams.join(", ")}`,
+          );
+        }
+
+        // Forward the authenticated identity (when present) so ACL
+        // `conditions` (identity_types/roles) evaluate the same way they
+        // would for an equivalent tools/call. Mirrors the identity
+        // propagation in registerHandlers()'s CallToolRequestSchema path.
+        const handleCallExtra: HandleCallExtra = {
+          sessionId: (extra as { sessionId?: string } | undefined)?.sessionId,
+        };
+        try {
+          const { getCurrentIdentity } = await import("../auth/storage.js");
+          const identity = getCurrentIdentity();
+          if (identity !== null) {
+            (handleCallExtra as HandleCallExtra & { identity?: unknown }).identity = identity;
+          }
+        } catch {
+          // auth module not available — skip silently (auth is optional).
+        }
+
+        const [content, isError] = await router.handleCall(
+          parsed.moduleId,
+          parsed.args,
+          handleCallExtra,
+        );
+        if (isError) {
+          throw new Error(content[0]?.text ?? `Failed to read resource: ${uri}`);
+        }
+        const result: ReadResourceResult = {
+          contents: [
+            {
+              uri,
+              text: content[0]?.text ?? "",
+              mimeType: "application/json",
+            },
+          ],
+        };
+        return result;
+      }
+
+      // docs://{module_id}
       const prefix = "docs://";
       if (!uri.startsWith(prefix)) {
         throw new Error(`Unsupported URI scheme: ${uri}`);

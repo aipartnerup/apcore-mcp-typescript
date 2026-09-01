@@ -19,6 +19,7 @@ import { registerMcpFormatter } from "./adapters/mcp-error-formatter.js";
 import type { MetricsExporter } from "./server/transport.js";
 import { installObservability, type ObservabilityFlag } from "./server/observability.js";
 import { createAsyncTaskBridge, type AsyncTaskBridge } from "./server/async-task-bridge.js";
+import { computeManagementSurfaces } from "./server/system-surface.js";
 import type {
   RegistryOrExecutor,
   Registry,
@@ -219,6 +220,113 @@ function buildOutputSchemaMap(registry: Registry): Record<string, Record<string,
     }
   }
   return map;
+}
+
+/**
+ * Structural mirror of apcore-typescript's `GovernanceState`
+ * (`src/pipeline.ts`, apcore 0.28.0, PROTOCOL_SPEC §6.6.5).
+ *
+ * Declared locally rather than imported from `apcore-js` because
+ * `Executor.governanceState()` is detected via runtime duck-typing (like
+ * every other optional apcore-js>=N feature in this file — `.use()`,
+ * `.setAcl()`) so this bridge keeps working, minus the warning, against an
+ * apcore-js older than 0.28.0. A static `import type { GovernanceState }
+ * from "apcore-js"` would fail `tsc` against such an install.
+ */
+interface GovernanceStateLike {
+  controlModulesRegistered: boolean;
+  readModulesRegistered: boolean;
+  aclConfigured: boolean;
+  builtinAclGateWired: boolean;
+  approvalHandlerConfigured: boolean;
+  builtinApprovalGateWired: boolean;
+  policyStrict: boolean;
+  allControlModulesRequireApproval: boolean;
+  unprotectedControlSurface: boolean;
+}
+
+/**
+ * Build the startup warning for aiperceivable/apcore-mcp#15(b): the
+ * `system.control.*` write modules are registered and reachable via
+ * `tools/call` with no recognised gate in front of them.
+ *
+ * Returns `null` when `state.unprotectedControlSurface` is false — nothing
+ * to warn about. Pure formatting only: this function never enforces,
+ * throws, or blocks startup — `Executor.governanceState()` is itself a pure
+ * read (PROTOCOL_SPEC §6.6.5), and what to do with an unprotected surface is
+ * left to the caller (here: warn and continue).
+ */
+export function formatUnprotectedControlSurfaceWarning(
+  state: GovernanceStateLike,
+): string | null {
+  if (!state.unprotectedControlSurface) return null;
+
+  const gaps: string[] = [];
+  if (!state.aclConfigured) {
+    gaps.push("No ACL is configured (executor.setAcl() / mcp.acl was never set).");
+  } else if (!state.builtinAclGateWired) {
+    gaps.push(
+      "An ACL is configured, but the running execution strategy does not " +
+        "include the built-in ACL gate, so the ACL is never consulted.",
+    );
+  }
+  if (!state.builtinApprovalGateWired) {
+    gaps.push(
+      "The running execution strategy does not include the built-in " +
+        "approval gate, so requiresApproval is never enforced.",
+    );
+  } else if (!state.allControlModulesRequireApproval) {
+    gaps.push(
+      "Not every registered system.control.* module declares " +
+        "requiresApproval, so at least one bypasses the approval gate entirely.",
+    );
+  } else if (!state.approvalHandlerConfigured && !state.policyStrict) {
+    gaps.push(
+      "No ApprovalHandler is configured and no ExecutionPolicy({ strict: " +
+        "true }) is set, so the approval gate SKIPS with a warning instead " +
+        "of failing closed.",
+    );
+  }
+
+  const rule = "=".repeat(78);
+  const lines = [
+    rule,
+    "apcore-mcp WARNING: unprotected system.control.* management surface",
+    rule,
+    "system.control.update_config / reload_module / toggle_feature are",
+    "registered and reachable via tools/call, but no recognised gate is",
+    "currently protecting them:",
+    "",
+    ...gaps.map((gap) => `  - ${gap}`),
+    "",
+    "Close this before exposing this server outside a fully trusted process:",
+    '  1. Configure an "acl/" directory with a rule covering targets:',
+    '     ["system.control.*"] (see src/acl-builder.ts for a copy-pasteable',
+    "     template), and/or",
+    "  2. Register an ApprovalHandler (e.g. ElicitationApprovalHandler /",
+    '     StorageBackedApprovalHandler) via the "approvalHandler" option, and/or',
+    "  3. Set an ExecutionPolicy({ strict: true }) so the approval gate fails",
+    "     closed instead of skipping when no handler is configured.",
+    "",
+    "This is a warning only — the server will continue to start.",
+    rule,
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * Duck-typed `Executor.governanceState()` call (apcore-js>=0.28.0). Returns
+ * `null` when the executor doesn't expose the method (older apcore-js) or
+ * the call throws for any reason — this warning must never block startup.
+ */
+function tryGovernanceState(executor: Executor): GovernanceStateLike | null {
+  const fn = (executor as { governanceState?: () => GovernanceStateLike }).governanceState;
+  if (typeof fn !== "function") return null;
+  try {
+    return fn.call(executor);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -614,6 +722,18 @@ export async function serve(
     acl: effectiveAcl,
   });
 
+  // aiperceivable/apcore-mcp#15(b): ACL/approval/policy are fully wired by
+  // this point (resolveExecutor above). Warn — before the server actually
+  // starts — when system.control.* is registered and reachable with no
+  // recognised gate in front of it. Uses origWarn (not console.warn) so the
+  // warning is never silenced by `logLevel`. Warning only; never blocks
+  // startup.
+  const governanceState = tryGovernanceState(executor);
+  if (governanceState) {
+    const warning = formatUnprotectedControlSurfaceWarning(governanceState);
+    if (warning) origWarn(warning);
+  }
+
   // Phase B: start the store's background sweep before the transport binds so
   // resolved/abandoned records are reclaimed. Stopped in the finally below.
   if (approvalStore && typeof approvalStore.start === "function") {
@@ -655,7 +775,10 @@ export async function serve(
 
   // Build MCP server components
   const factory = new MCPServerFactory();
-  const server = factory.createServer(name, version);
+  // aiperceivable/apcore-mcp#16 phase A: advertise `com.aiperceivable/management`
+  // in `initialize` capabilities only for surfaces actually registered.
+  const managementSurfaces = computeManagementSurfaces(registry);
+  const server = factory.createServer(name, version, managementSurfaces);
   let tools = factory.buildTools(registry, { tags, prefix });
   tools = factory.attachAsyncMetaTools(tools, asyncBridge ?? undefined);
   const router = new ExecutionRouter(executor, {
@@ -668,7 +791,7 @@ export async function serve(
     asyncTaskBridge: asyncBridge ?? undefined,
   });
   factory.registerHandlers(server, tools, router);
-  factory.registerResourceHandlers(server, registry);
+  factory.registerResourceHandlers(server, registry, router);
 
   // Start dynamic tool registration listener if enabled
   if (options.dynamic) {
@@ -900,6 +1023,15 @@ export async function asyncServe(
     acl: effectiveAcl,
   });
 
+  // aiperceivable/apcore-mcp#15(b): see serve() for rationale — warn before
+  // the app is built when system.control.* is reachable with no recognised
+  // gate. Warning only; never blocks startup.
+  const governanceState = tryGovernanceState(executor);
+  if (governanceState) {
+    const warning = formatUnprotectedControlSurfaceWarning(governanceState);
+    if (warning) origWarn(warning);
+  }
+
   // Phase B: start the store's background sweep. Stopped in the wrapped close().
   if (approvalStore && typeof approvalStore.start === "function") {
     approvalStore.start();
@@ -940,7 +1072,10 @@ export async function asyncServe(
 
   // Build MCP server components
   const factory = new MCPServerFactory();
-  const server = factory.createServer(name, version);
+  // aiperceivable/apcore-mcp#16 phase A: advertise `com.aiperceivable/management`
+  // in `initialize` capabilities only for surfaces actually registered.
+  const managementSurfaces = computeManagementSurfaces(registry);
+  const server = factory.createServer(name, version, managementSurfaces);
   let tools = factory.buildTools(registry, { tags, prefix });
   tools = factory.attachAsyncMetaTools(tools, asyncBridge ?? undefined);
   const router = new ExecutionRouter(executor, {
@@ -953,7 +1088,7 @@ export async function asyncServe(
     asyncTaskBridge: asyncBridge ?? undefined,
   });
   factory.registerHandlers(server, tools, router);
-  factory.registerResourceHandlers(server, registry);
+  factory.registerResourceHandlers(server, registry, router);
 
   // Start dynamic tool registration listener if enabled. The embedded handler
   // has no explicit stop hook, so the listener's teardown is wired into the

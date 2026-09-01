@@ -1,23 +1,74 @@
 /**
  * Build an apcore `ACL` instance from a Config Bus `mcp.acl` section.
  *
- * Config Bus schema (YAML, shared across Python/TS/Rust bridges):
+ * Config Bus schema (YAML, shared across Python/TS/Rust bridges). The real,
+ * registered `system.*` module ids (from `registerSysModules` in
+ * apcore-typescript's `src/sys-modules/registration.ts`) are:
+ *
+ *   system.health.summary     system.manifest.module    system.control.toggle_feature
+ *   system.health.module      system.manifest.full      system.control.update_config
+ *   system.usage.summary      system.usage.module       system.control.reload_module
+ *
+ * There is no `sys.*` namespace — a rule copied with a `sys.*` target never
+ * matches anything, and ACL evaluation is first-match-wins (PROTOCOL_SPEC
+ * §6.3), so the miss is silent rather than an error (aiperceivable/apcore-mcp#14).
+ *
+ * Two mechanism facts the template below depends on:
+ * - Calls arriving over MCP always have `caller_id == null`, which ACL
+ *   evaluation normalises to `@external`. You CANNOT separate "console" from
+ *   "agent" using `callers` alone.
+ * - That separation is done by `conditions` reading the authenticated
+ *   identity: `identity_types` and `roles` are populated from JWT claims by
+ *   `auth/jwt.ts` (`sub` → `Identity.id`, `type` → `Identity.type`, `roles` →
+ *   `Identity.roles`).
  *
  * ```yaml
  * mcp:
  *   acl:
- *     default_effect: deny          # or "allow" — default "deny" (fail-secure)
+ *     default_effect: deny
  *     rules:
- *       - callers: ["role:admin"]
- *         targets: ["sys.*"]
+ *       # Rule 1 — read-only management surface.
+ *       # MUST precede the catch-all deny: evaluation is first-match-wins.
+ *       - callers: ["@external"]
+ *         targets: ["system.health.*", "system.usage.*", "system.manifest.*"]
  *         effect: allow
- *         description: "Admins can reach system modules"
- *       - callers: ["*"]
- *         targets: ["sys.reload", "sys.toggle"]
- *         effect: deny
  *         conditions:
- *           identity_types: ["human", "system"]
+ *           identity_types: ["human"]
+ *           roles: ["apcore.admin"]
+ *         description: "Console read access to the management surface"
+ *
+ *       # Rule 2 — administration. ACL allow is not execution:
+ *       # system.control.* declares requiresApproval=true and still passes
+ *       # the approval gate.
+ *       - callers: ["@external"]
+ *         targets: ["system.control.*"]
+ *         effect: allow
+ *         conditions:
+ *           identity_types: ["human"]
+ *           roles: ["apcore.admin"]
+ *         description: "Administration; requires_approval still applies"
+ *
+ *       # Rule 3 — catch-all deny. MUST be last.
+ *       # Agent identities, anonymous callers and insufficient roles land here.
+ *       - callers: ["@external"]
+ *         targets: ["system.*"]
+ *         effect: deny
+ *         description: "Block all other access to system modules"
  * ```
+ *
+ * **Enabling `sys_modules.enabled` without an ACL means no authorization.**
+ * `ACL.discover()` returns `null` when the resolved `acl/` path does not
+ * exist — "missing path = no enforcement, identical to a project that never
+ * configured an ACL" (apcore-typescript `src/acl.ts`). That default is
+ * deliberate and unchanged; enabling system modules with no `acl/` directory
+ * on disk means the entire management surface (including `system.control.*`)
+ * is reachable by any caller who can reach the MCP transport.
+ *
+ * A rule may also carry `approval: "required"` (apcore 0.28.0,
+ * argument-scoped approval, PROTOCOL_SPEC §6.1.6). It is validated here only
+ * loosely — must be `"required"` or omitted — and passed through verbatim;
+ * `new ACL()` performs the authoritative validation (e.g. rejecting
+ * `approval: "required"` paired with `effect: "deny"`).
  *
  * Mirrors the Python `acl_builder.build_acl_from_config` contract. Invalid
  * entries throw so misconfiguration fails loudly at startup.
@@ -30,6 +81,7 @@ const ALLOWED_RULE_KEYS = new Set([
   "effect",
   "description",
   "conditions",
+  "approval",
 ]);
 
 export interface AclConfigRule {
@@ -38,6 +90,13 @@ export interface AclConfigRule {
   effect: string;
   description?: string;
   conditions?: Record<string, unknown> | null;
+  /**
+   * Argument-scoped approval (apcore 0.28.0, PROTOCOL_SPEC §6.1.6). Only
+   * `"required"` is accepted here — omit the field for the (default)
+   * "not required" case. `new ACL()` is the authoritative validator; this
+   * bridge only avoids rejecting the key outright.
+   */
+  approval?: string;
 }
 
 export interface AclConfigSection {
@@ -159,6 +218,14 @@ export async function buildAclFromConfig(
         );
       }
       rule.conditions = rec.conditions as Record<string, unknown>;
+    }
+    if (rec.approval !== undefined && rec.approval !== null) {
+      if (rec.approval !== "required") {
+        throw new Error(
+          `mcp.acl.rules[${idx}] 'approval' must be 'required' (or omitted), got '${String(rec.approval)}'`,
+        );
+      }
+      rule.approval = rec.approval;
     }
     rules.push(rule);
   }
