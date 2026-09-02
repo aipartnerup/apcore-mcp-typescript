@@ -71,11 +71,18 @@ repository. Bumps the required `apcore-js` floor to `0.28.0` and
   approval; a regression test asserts this explicitly.
   (aiperceivable/apcore-mcp#16 phase A)
 - `AclConfigRule.approval` — Config Bus `mcp.acl` rules may now carry
-  `approval: "required"` (apcore 0.28.0 argument-scoped approval,
-  PROTOCOL_SPEC §6.1.6). Previously any rule with this key was rejected
-  outright by the "unknown rule key" check; the value is now accepted and
-  passed through to `new ACL()`, which performs the authoritative
-  validation.
+  `approval` (apcore 0.28.0 argument-scoped approval, PROTOCOL_SPEC §6.1.6).
+  Previously any rule with this key was rejected outright by the "unknown
+  rule key" check; the value is now accepted and passed through to
+  `new ACL()`, which performs the authoritative validation. Both spellings
+  apcore-js's own `ACLApproval` accepts are accepted here — `"required"` and
+  `"not_required"`. An earlier iteration accepted only `"required"`, which
+  made this bridge **stricter than the schema it bridges**: a rule that
+  loads fine from apcore's own `acl/` directory failed at startup when the
+  identical rule was carried through the Config Bus instead. Rejecting the
+  redundant spelling prevented no misconfiguration — apcore treats an
+  explicit `not_required` and an omitted key identically — while breaking a
+  valid configuration.
 - README: documents that enabling `sys_modules.enabled` without configuring
   an `acl/` directory leaves the entire management surface — including
   `system.control.*` — with no authorization (`ACL.discover()` returns
@@ -93,6 +100,22 @@ repository. Bumps the required `apcore-js` floor to `0.28.0` and
 
 ### Tests
 
+- **New `tests/acl-approval-gating-e2e.test.ts`.** Every other `approval`
+  test in this repo stopped at the Config Bus parsing layer — they proved
+  the key was *accepted*, not that it *did* anything, leaving the
+  "gating the call on a human decision even though the ACL itself allows it"
+  claim unverified at the MCP boundary. These drive a real `apcore-js`
+  `Executor` (real `ACL`, real approval handler, real module) through
+  `ExecutionRouter.handleCall`, with the module's own `requiresApproval`
+  annotation set to **false** so the ACL rule is the only possible source of
+  the requirement, and an argument-scoped condition
+  (`conditions.arguments.has_key`) deciding it: a call carrying `recursive`
+  reaches the approval handler, an otherwise identical call without it does
+  not.
+- The shared `acl_config.json` fixture gained `approval` contract cases (see
+  the spec repo's 0.19.0 entry), pinning the accepted-value set across the
+  three bridges rather than leaving each to decide independently — the gap
+  that allowed the `not_required` divergence noted above.
 - New `tests/system-surface-conformance.test.ts`: drives the shared
   `apcore-mcp/conformance/fixtures/system_surface.json` fixture — built from
   a real `apcore-js` `registerSysModules()` call — through `buildTools()` /

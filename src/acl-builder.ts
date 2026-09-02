@@ -64,11 +64,15 @@
  * on disk means the entire management surface (including `system.control.*`)
  * is reachable by any caller who can reach the MCP transport.
  *
- * A rule may also carry `approval: "required"` (apcore 0.28.0,
- * argument-scoped approval, PROTOCOL_SPEC §6.1.6). It is validated here only
- * loosely — must be `"required"` or omitted — and passed through verbatim;
+ * A rule may also carry `approval` (apcore 0.28.0, argument-scoped approval,
+ * PROTOCOL_SPEC §6.1.6). Accepted values are the same closed set apcore-js
+ * itself accepts — `"required"` and `"not_required"` (`ACLApproval` in
+ * apcore-js `src/acl.ts`) — and the value is passed through verbatim;
  * `new ACL()` performs the authoritative validation (e.g. rejecting
- * `approval: "required"` paired with `effect: "deny"`).
+ * `approval: "required"` paired with `effect: "deny"`). This bridge
+ * deliberately does not narrow that set: an earlier version accepted only
+ * `"required"`, which made a rule that loads fine from apcore's own `acl/`
+ * directory fail at startup when carried through the Config Bus instead.
  *
  * Mirrors the Python `acl_builder.build_acl_from_config` contract. Invalid
  * entries throw so misconfiguration fails loudly at startup.
@@ -83,6 +87,13 @@ const ALLOWED_RULE_KEYS = new Set([
   "conditions",
   "approval",
 ]);
+/**
+ * The closed set apcore-js's own `ACLApproval` accepts (PROTOCOL_SPEC
+ * §6.1.6). `"not_required"` is both spec-sanctioned and the default, so it
+ * is accepted here rather than rejected as a redundant spelling — see the
+ * module doc comment.
+ */
+const ALLOWED_APPROVALS = new Set(["required", "not_required"]);
 
 export interface AclConfigRule {
   callers: string[];
@@ -91,10 +102,10 @@ export interface AclConfigRule {
   description?: string;
   conditions?: Record<string, unknown> | null;
   /**
-   * Argument-scoped approval (apcore 0.28.0, PROTOCOL_SPEC §6.1.6). Only
-   * `"required"` is accepted here — omit the field for the (default)
-   * "not required" case. `new ACL()` is the authoritative validator; this
-   * bridge only avoids rejecting the key outright.
+   * Argument-scoped approval (apcore 0.28.0, PROTOCOL_SPEC §6.1.6).
+   * `"required"` or `"not_required"` — the same closed set apcore-js
+   * accepts; omitting the field means `"not_required"`. `new ACL()` is the
+   * authoritative validator.
    */
   approval?: string;
 }
@@ -220,9 +231,9 @@ export async function buildAclFromConfig(
       rule.conditions = rec.conditions as Record<string, unknown>;
     }
     if (rec.approval !== undefined && rec.approval !== null) {
-      if (rec.approval !== "required") {
+      if (typeof rec.approval !== "string" || !ALLOWED_APPROVALS.has(rec.approval)) {
         throw new Error(
-          `mcp.acl.rules[${idx}] 'approval' must be 'required' (or omitted), got '${String(rec.approval)}'`,
+          `mcp.acl.rules[${idx}] 'approval' must be 'required' or 'not_required' (or omitted), got '${String(rec.approval)}'`,
         );
       }
       rule.approval = rec.approval;

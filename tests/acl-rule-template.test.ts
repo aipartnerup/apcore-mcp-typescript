@@ -103,7 +103,26 @@ describe("buildAclFromConfig() approval field", () => {
     expect(acl).toBeInstanceOf(apcore.ACL);
   });
 
-  it("rejects a rule with an approval value other than 'required'", async () => {
+  it("accepts approval: 'not_required' — the same closed set apcore-js accepts", async () => {
+    // Rejecting this was a real portability break: `not_required` is
+    // spec-sanctioned (PROTOCOL_SPEC §6.1.6) and is apcore-js's own default,
+    // so a rule that loads from apcore's `acl/` directory MUST also load
+    // through the Config Bus. The bridge must not narrow its upstream schema.
+    const apcore = await import("apcore-js");
+    const acl = await buildAclFromConfig({
+      rules: [
+        {
+          callers: ["*"],
+          targets: ["public.*"],
+          effect: "allow",
+          approval: "not_required",
+        },
+      ],
+    });
+    expect(acl).toBeInstanceOf(apcore.ACL);
+  });
+
+  it("rejects an approval value outside the closed set", async () => {
     await expect(
       buildAclFromConfig({
         rules: [
@@ -115,7 +134,7 @@ describe("buildAclFromConfig() approval field", () => {
           },
         ],
       }),
-    ).rejects.toThrow(/'approval' must be 'required'/);
+    ).rejects.toThrow(/'approval' must be 'required' or 'not_required'/);
   });
 
   it("no longer rejects the 'approval' key as unknown", async () => {
