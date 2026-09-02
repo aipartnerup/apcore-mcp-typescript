@@ -21,7 +21,9 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ExecutionRouter } from "../src/server/router.js";
+import { MCPServerFactory } from "../src/server/factory.js";
 
 const MODULE_ID = "files.delete";
 
@@ -132,5 +134,89 @@ describe("ACL-sourced approval gating over a real tools/call", () => {
       handler.requests,
       "a call without `recursive` does not match the approval rule and MUST NOT be put to a human — gating it would be the over-refusal §6.1.7 exists to prevent",
     ).toEqual([]);
+  });
+});
+
+/**
+ * The same enforcement must hold on the `resources/read` path, which is the
+ * claim aiperceivable/apcore-mcp#15 makes: every `apcore://system.*` read
+ * dispatches through `ExecutionRouter.handleCall` — never directly against the
+ * registry — so ACL and audit apply identically to `tools/call` and
+ * `resources/read`.
+ *
+ * The shipped resource tests all drive a stub router, so they prove the read is
+ * *routed*; none of them proves the ACL actually *refuses*. A bypass here would
+ * be a management-surface disclosure, so it is asserted directly.
+ */
+describe("ACL enforcement on apcore:// management resource reads", () => {
+  /** Captures the handlers `registerResourceHandlers` installs. */
+  function mockServer(): {
+    server: { setRequestHandler: (schema: unknown, handler: Function) => void };
+    handlers: Map<unknown, Function>;
+  } {
+    const handlers = new Map<unknown, Function>();
+    return {
+      server: {
+        setRequestHandler: (schema: unknown, handler: Function) => {
+          handlers.set(schema, handler);
+        },
+      },
+      handlers,
+    };
+  }
+
+  async function systemServer(effect: "allow" | "deny") {
+    const apcore = (await import("apcore-js")) as unknown as {
+      Registry: new () => unknown;
+      Executor: new (opts: { registry: unknown }) => unknown;
+      Config: new (data?: Record<string, unknown>) => unknown;
+      ACL: new (rules: unknown[], defaultEffect: string) => unknown;
+      registerSysModules: (r: unknown, e: unknown, c: unknown, m: unknown) => void;
+    };
+
+    const registry = new apcore.Registry();
+    const executor = new apcore.Executor({ registry }) as {
+      setAcl?: (acl: unknown) => void;
+    };
+    const config = new apcore.Config({
+      sys_modules: { enabled: true, events: { enabled: true } },
+    });
+    apcore.registerSysModules(registry, executor, config, null);
+    executor.setAcl?.(new apcore.ACL([{ callers: ["*"], targets: ["system.*"], effect }], "deny"));
+
+    const factory = new MCPServerFactory();
+    const { server, handlers } = mockServer();
+    factory.registerResourceHandlers(
+      server as never,
+      registry as never,
+      new ExecutionRouter(executor as never),
+    );
+    return handlers;
+  }
+
+  async function read(handlers: Map<unknown, Function>, uri: string) {
+    const handler = handlers.get(ReadResourceRequestSchema);
+    expect(handler, "read_resource handler must be registered").toBeDefined();
+    try {
+      return { ok: true, rendered: JSON.stringify(await handler!({ params: { uri } })) };
+    } catch (err) {
+      return { ok: false, rendered: String(err) };
+    }
+  }
+
+  it("lets an allowed caller read the management resource (control)", async () => {
+    const { ok, rendered } = await read(await systemServer("allow"), "apcore://system.health.summary");
+
+    expect(ok, `an allowed caller must reach the resource, got: ${rendered}`).toBe(true);
+    expect(rendered).toContain("project");
+  });
+
+  it("refuses the read when the ACL denies system.*", async () => {
+    const { ok, rendered } = await read(await systemServer("deny"), "apcore://system.health.summary");
+
+    expect(
+      ok,
+      `an ACL that denies system.* MUST refuse the resource read — it must not bypass the gate a tools/call passes. Got: ${rendered.slice(0, 300)}`,
+    ).toBe(false);
   });
 });

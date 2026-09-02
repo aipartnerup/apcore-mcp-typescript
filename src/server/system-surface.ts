@@ -30,16 +30,24 @@ export const SYSTEM_PREFIX = "system.";
 export const SYSTEM_RESOURCE_SCHEME = "apcore:";
 
 /**
- * True for a read-only management module: `system.health.*`,
- * `system.usage.*`, or `system.manifest.*`. `system.control.*` (and
- * anything outside `system.*`) is false.
+ * True when `moduleId` is projected as an MCP resource rather than a tool:
+ * one of the six canonical read-only management modules. `system.control.*`
+ * (and anything outside `system.*`) is false.
+ *
+ * Matches the six canonical ids exactly rather than the three prefixes. The
+ * two agree for every registry `registerSysModules()` produces, and differ
+ * only for a read-only `system.*` id this adapter has no resource for — a
+ * seventh module added by a future apcore-js, or one a host registered
+ * through `registerInternal` itself. A prefix match would drop such a module
+ * from `tools/list` while {@link MCPServerFactory.registerResourceHandlers}
+ * (which builds from these same canonical ids) gave it no resource either,
+ * so it would vanish from both discovery surfaces at once. Keeping it a tool
+ * is the safer failure: visible and callable, merely classified as a tool
+ * until this adapter learns its resource shape. Discovery is all that is at
+ * stake — `tools/call` dispatches by id and never consulted this list.
  */
 export function isSystemReadModule(moduleId: string): boolean {
-  return (
-    moduleId.startsWith(SYSTEM_HEALTH_PREFIX) ||
-    moduleId.startsWith(SYSTEM_USAGE_PREFIX) ||
-    moduleId.startsWith(SYSTEM_MANIFEST_PREFIX)
-  );
+  return SYSTEM_RESOURCE_MODULE_IDS.has(moduleId);
 }
 
 /** True for a `system.control.*` write module — stays an MCP tool. */
@@ -70,6 +78,16 @@ export const SYSTEM_TEMPLATE_RESOURCE_MODULES = [
   "system.manifest.module",
   "system.usage.module",
 ] as const;
+
+/**
+ * The read-only management modules this adapter actually projects as
+ * resources. Membership here — not a bare prefix match — is what removes a
+ * module from `tools/list`; see {@link isSystemReadModule}.
+ */
+const SYSTEM_RESOURCE_MODULE_IDS: ReadonlySet<string> = new Set<string>([
+  ...SYSTEM_STATIC_RESOURCE_MODULES,
+  ...SYSTEM_TEMPLATE_RESOURCE_MODULES,
+]);
 
 /** Query parameters each management module id accepts (beyond `module_id`). */
 const SYSTEM_RESOURCE_QUERY_PARAMS: Record<string, readonly string[]> = {

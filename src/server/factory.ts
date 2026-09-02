@@ -443,10 +443,11 @@ export class MCPServerFactory {
       }
     }
 
-    // `system.*` management surface — classification is by module_id
-    // presence in the registry ONLY (no separate switch/env var), matching
-    // isSystemReadModule()'s prefix-only classification. A module id is
-    // included here iff registry.list() actually returned it, so
+    // `system.*` management surface — classification is by module_id ONLY
+    // (no separate switch/env var), over the same canonical id set
+    // isSystemReadModule() removes from `tools/list`, so the two can never
+    // disagree about which modules leave one surface for the other. A module
+    // id is included here iff registry.list() actually returned it, so
     // `sys_modules.enabled = false` (nothing registered) yields none of
     // this, exactly like the docs:// resources above.
     const registeredIds = new Set(moduleIds);

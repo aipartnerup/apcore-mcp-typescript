@@ -72,15 +72,18 @@ describe("conformance: system.* module -> exact MCP primitive", () => {
     return;
   }
 
-  it("system.control.* modules are tools", async () => {
+  // The `system.*` tool set must equal the fixture's exactly — not merely
+  // contain it. A subset assertion would let an adapter emit an *extra*
+  // management tool and still pass, which is the divergence direction this
+  // fixture exists to catch (#15 asks for byte-identical `tools/list`).
+  it("system.control.* modules are tools, and nothing else under system.* is", async () => {
     const { registry } = await realRegistryAndExecutor();
     const factory = new MCPServerFactory();
     const tools = factory.buildTools(registry as any);
-    const toolNames = new Set(tools.map((t) => t.name));
+    const systemToolNames = tools.map((t) => t.name).filter((n) => n.startsWith("system."));
+    const expected = FIXTURE.tools.map((t) => t.name);
 
-    for (const expected of FIXTURE.tools) {
-      expect(toolNames.has(expected.name), `${expected.module_id} missing from tools/list`).toBe(true);
-    }
+    expect([...systemToolNames].sort()).toEqual([...expected].sort());
   });
 
   it("read-only system.* modules are NOT tools", async () => {
@@ -105,24 +108,23 @@ describe("conformance: system.* module -> exact MCP primitive", () => {
     const listResources = handlers.get(ListResourcesRequestSchema);
     expect(listResources).toBeDefined();
     const resourcesResult = await listResources!({});
-    const resourceUris = new Set(resourcesResult.resources.map((r: { uri: string }) => r.uri));
+    // Only the `apcore://` scheme is this fixture's contract; `docs://`
+    // resources legitimately vary with how many modules carry documentation.
+    const apcoreUris = resourcesResult.resources
+      .map((r: { uri: string }) => r.uri)
+      .filter((u: string) => u.startsWith("apcore://"));
 
-    for (const expected of FIXTURE.resources) {
-      expect(resourceUris.has(expected.uri), `${expected.module_id} missing from resources/list`).toBe(true);
-    }
+    expect([...apcoreUris].sort()).toEqual([...FIXTURE.resources.map((r) => r.uri)].sort());
 
     const listTemplates = handlers.get(ListResourceTemplatesRequestSchema);
     expect(listTemplates, "resources/templates/list handler must be registered").toBeDefined();
     const templatesResult = await listTemplates!({});
-    const templateUris = new Set(
-      templatesResult.resourceTemplates.map((t: { uriTemplate: string }) => t.uriTemplate),
-    );
+    const templateUris = templatesResult.resourceTemplates
+      .map((t: { uriTemplate: string }) => t.uriTemplate)
+      .filter((u: string) => u.startsWith("apcore://"));
 
-    for (const expected of FIXTURE.resource_templates) {
-      expect(
-        templateUris.has(expected.uri_template),
-        `${expected.module_id} missing from resources/templates/list (got ${[...templateUris].join(", ")})`,
-      ).toBe(true);
-    }
+    expect([...templateUris].sort()).toEqual(
+      [...FIXTURE.resource_templates.map((t) => t.uri_template)].sort(),
+    );
   });
 });

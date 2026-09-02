@@ -31,6 +31,18 @@ describe("isSystemReadModule", () => {
     expect(isSystemReadModule("text.analyze")).toBe(false);
     expect(isSystemReadModule("systemx.health.summary")).toBe(false);
   });
+
+  it("leaves an unrecognised read-only system.* id a tool rather than vanishing it", () => {
+    // registerResourceHandlers builds resources from the six canonical ids, so
+    // a bare prefix match here would remove such a module from `tools/list`
+    // while giving it no resource either — it would disappear from both
+    // discovery surfaces at once. A seventh module added by a future
+    // apcore-js, or one a host registered through `registerInternal`, must
+    // stay visible as a tool until this adapter learns its resource shape.
+    expect(isSystemReadModule("system.health.history")).toBe(false);
+    expect(isSystemReadModule("system.usage.trend")).toBe(false);
+    expect(isSystemReadModule("system.manifest.diff")).toBe(false);
+  });
 });
 
 describe("isSystemControlModule", () => {
