@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [0.20.1] - 2026-09-06
+## [0.20.0] - 2026-09-06
 
 Bugfix release from a `/apcore-skills:sync` pass across all three bridges. 0.20.0's tests all passed
 and its features work as documented — this release closes gaps between what shipped and what the
@@ -80,8 +80,6 @@ against the 0.20.0 session's own narrative. 793 tests pass (was 782).
 - `docs/srs-apcore-mcp.md`'s FR-OPENAPI-002 heading corrected from "projects unchanged onto both
   protocol surfaces" to "is projected, then reaches both protocol surfaces unchanged" — the old
   text contradicted its own Description and Boundary Conditions.
-
-## [0.20.0] - 2026-09-06
 
 Feature release: the **OpenAPI backend** — point the bridge at an OpenAPI 3.0/3.1 document and every
 operation becomes an MCP tool, proxied over HTTP — plus the `mcp.acl` half of apcore 0.29.0's
