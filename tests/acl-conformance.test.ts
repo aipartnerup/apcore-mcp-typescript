@@ -28,7 +28,10 @@ interface Fixture {
     id: string;
     description: string;
     input: unknown;
-    expected_error_substring: string;
+    expected_error_substring?: string;
+    expected_error_substrings?: string[];
+    expected_error_names_field?: string;
+    must_not_contain?: string;
   }>;
 }
 
@@ -70,9 +73,45 @@ describe("conformance: buildAclFromConfig error cases", () => {
   }
   for (const c of FIXTURE.error_cases) {
     it(c.id, async () => {
-      await expect(buildAclFromConfig(c.input)).rejects.toThrow(
-        c.expected_error_substring,
-      );
+      let message: string | null = null;
+      try {
+        await buildAclFromConfig(c.input);
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      expect(message, `${c.id}: expected a rejection`).not.toBeNull();
+
+      // contract_version 1.2 accepts `expected_error_substring` (a single
+      // string, as in 1.0/1.1) and/or `expected_error_substrings` (an array);
+      // every fragment present must appear.
+      const expected = [
+        ...(c.expected_error_substring ? [c.expected_error_substring] : []),
+        ...(c.expected_error_substrings ?? []),
+      ];
+      expect(expected.length, `${c.id}: fixture case carries no expectation`).toBeGreaterThan(0);
+      for (const fragment of expected) {
+        expect(message!, `${c.id}: missing ${fragment}`).toContain(fragment);
+      }
+
+      // The fixture pins the offending FIELD rather than a reason phrase: the
+      // reason is apcore's, and apcore-js and apcore-python word the same
+      // fault entirely differently.
+      if (c.expected_error_names_field) {
+        // The BARE name, not the quoted form: apcore-python and apcore-js
+        // write `'callers'` while apcore-rust writes `'callers[1]'`, naming
+        // the offending element. The bare token is what all three share.
+        expect(message!, `${c.id}: does not name the field`).toContain(
+          c.expected_error_names_field,
+        );
+      }
+
+      // `must_not_contain` separates "named the right axis" from "rejected
+      // something" — it is how the §6.2.1 ordering case is checked.
+      if (c.must_not_contain) {
+        expect(message!, `${c.id}: reported the wrong validation axis`).not.toContain(
+          c.must_not_contain,
+        );
+      }
     });
   }
 });

@@ -25,6 +25,13 @@ export const MCP_DEFAULTS: Record<string, unknown> = {
   // Declarative ACL — { default_effect: "deny"|"allow", rules: [ACLRule...] }.
   // null / empty means "no ACL" (allow all). See acl-builder.ts.
   acl: null,
+  // OpenAPI backend — { spec, base_url, prefix, include, exclude,
+  // include_deprecated, timeout, headers, acknowledge_unapproved_writes }.
+  // `spec` is the FIRST path-typed key in this namespace and is explicitly
+  // NOT covered by apcore 0.30.0's Config.pathTypedKeys() — see
+  // openapi-backend.ts's resolveSpecLocation, which owns its own
+  // empty/URL/relative-path rules instead.
+  openapi: null,
 };
 
 /** Register the 'mcp' config namespace. Safe to call multiple times. */

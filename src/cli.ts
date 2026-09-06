@@ -22,10 +22,18 @@ apcore-mcp v${VERSION} - Automatic MCP Server for apcore modules
 Usage:
   apcore-mcp --extensions-dir <path> [options]
 
-Required:
+Backend source (at least one; both allowed; combining requires --openapi-prefix):
   --extensions-dir <path>    Path to apcore extensions directory
+  --from-openapi <url|path> OpenAPI 3.0/3.1 spec URL or path — serve a remote API as MCP tools
+                             (mcp.openapi.spec on the Config Bus also works with neither flag)
 
 Options:
+  --openapi-base-url <url>   Base URL for proxied requests (default: the document's servers[0].url)
+  --openapi-prefix <prefix>  Prepended to every derived module ID
+  --openapi-include <glob>   Scanner include filter
+  --openapi-exclude <glob>   Scanner exclude filter
+  --openapi-header <k:v>     Header for the spec fetch only, repeatable. Never sent with proxied calls
+  --openapi-no-deprecated    Skip operations marked deprecated: true
   --transport <type>         Transport type: stdio, streamable-http, sse (default: stdio)
   --host <address>           Host for HTTP transports (default: 127.0.0.1)
   --port <number>            Port for HTTP transports (default: 8000, range: 1-65535)
@@ -65,6 +73,13 @@ export async function main(): Promise<void> {
     parsed = parseArgs({
       options: {
         "extensions-dir": { type: "string" },
+        "from-openapi": { type: "string" },
+        "openapi-base-url": { type: "string" },
+        "openapi-prefix": { type: "string" },
+        "openapi-include": { type: "string" },
+        "openapi-exclude": { type: "string" },
+        "openapi-header": { type: "string", multiple: true },
+        "openapi-no-deprecated": { type: "boolean", default: false },
         transport: { type: "string", default: "stdio" },
         host: { type: "string", default: "127.0.0.1" },
         port: { type: "string", default: "8000" },
@@ -104,18 +119,51 @@ export async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Validate --extensions-dir
+  // Backend-source rule: at least one, both allowed, both requires a prefix.
+  // A third route — mcp.openapi.spec configured on the Config Bus alone,
+  // with neither CLI flag — also counts (PRD F-054 Acceptance Criterion 1).
+  // serve() -> its Config-Bus fallback picks it up automatically once a
+  // (possibly undefined) registry reaches it, so this CLI's own job is only
+  // to not reject that case before it gets there.
   const extensionsDir = values["extensions-dir"];
-  if (!extensionsDir) {
-    fail("--extensions-dir is required.");
+  const fromOpenapi = values["from-openapi"];
+  const openapiPrefix = values["openapi-prefix"];
+  if (!extensionsDir && !fromOpenapi) {
+    let hasConfigBusOpenapi = false;
+    try {
+      const apcore = await import("apcore-js");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const Config = (apcore as any).Config;
+      const config = typeof Config?.getInstance === "function" ? Config.getInstance() : undefined;
+      hasConfigBusOpenapi = Boolean(config?.get?.("mcp.openapi"));
+    } catch {
+      // apcore-js not installed — treated the same as "no Config Bus value".
+    }
+    if (!hasConfigBusOpenapi) {
+      fail(
+        "a backend source is required — pass --extensions-dir, --from-openapi, set " +
+          "mcp.openapi.spec on the Config Bus, or combine them.",
+        2,
+      );
+    }
+  }
+  if (extensionsDir && fromOpenapi && !openapiPrefix) {
+    fail(
+      "--openapi-prefix is required when --extensions-dir and --from-openapi are combined, " +
+        "so the two module-ID spaces cannot collide.",
+      2,
+    );
   }
 
-  const resolvedDir = resolve(extensionsDir);
-  if (!existsSync(resolvedDir)) {
-    fail(`--extensions-dir '${extensionsDir}' does not exist.`);
-  }
-  if (!statSync(resolvedDir).isDirectory()) {
-    fail(`--extensions-dir '${extensionsDir}' is not a directory.`);
+  let resolvedDir: string | undefined;
+  if (extensionsDir) {
+    resolvedDir = resolve(extensionsDir);
+    if (!existsSync(resolvedDir)) {
+      fail(`--extensions-dir '${extensionsDir}' does not exist.`);
+    }
+    if (!statSync(resolvedDir).isDirectory()) {
+      fail(`--extensions-dir '${extensionsDir}' is not a directory.`);
+    }
   }
 
   // Validate transport
@@ -141,7 +189,9 @@ export async function main(): Promise<void> {
 
   // Dynamic import of apcore Registry (peer dependency)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let Registry: new (options: { extensionsDir: string }) => { discover(): Promise<number> };
+  let Registry: new (options?: { extensionsDir?: string }) => {
+    discover(): Promise<number>;
+  };
   try {
     const apcore = await import("apcore-js");
     Registry = apcore.Registry;
@@ -151,14 +201,50 @@ export async function main(): Promise<void> {
     );
   }
 
-  // Create Registry and discover modules
-  const registry = new Registry({ extensionsDir: resolvedDir });
-  const numModules = await registry.discover();
+  // Create the Registry. The union is assembled in a fixed order —
+  // extensions directory first, then OpenAPI operations — so a collision
+  // report names the OpenAPI side, which is the one the operator can
+  // rename with a prefix. Neither flag given: pass `undefined` through to
+  // serve() -> its Config-Bus fallback, rather than handing it an empty
+  // stand-in Registry() that would be mistaken for a second, explicit
+  // backend source and wrongly require mcp.openapi.prefix.
+  let registry: { discover(): Promise<number> } | undefined;
+  if (resolvedDir) {
+    registry = new Registry({ extensionsDir: resolvedDir });
+    const numModules = await registry.discover();
+    if (numModules === 0) {
+      console.warn(`Warning: No modules discovered in '${extensionsDir}'.`);
+    } else {
+      console.info(`Discovered ${numModules} module(s) in '${extensionsDir}'.`);
+    }
+  } else if (fromOpenapi) {
+    registry = new Registry();
+  }
 
-  if (numModules === 0) {
-    console.warn(`Warning: No modules discovered in '${extensionsDir}'.`);
-  } else {
-    console.info(`Discovered ${numModules} module(s) in '${extensionsDir}'.`);
+  if (fromOpenapi) {
+    const { openapiBackend } = await import("./openapi-backend.js");
+    const headers: Record<string, string> = {};
+    for (const raw of values["openapi-header"] ?? []) {
+      const idx = raw.indexOf(":");
+      if (idx === -1) {
+        fail(`--openapi-header must be KEY:VALUE, got '${raw}'.`, 2);
+      }
+      headers[raw.slice(0, idx).trim()] = raw.slice(idx + 1).trim();
+    }
+    try {
+      await openapiBackend(fromOpenapi, {
+        baseUrl: values["openapi-base-url"],
+        prefix: openapiPrefix,
+        include: values["openapi-include"],
+        exclude: values["openapi-exclude"],
+        includeDeprecated: !values["openapi-no-deprecated"],
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+        registry: registry as never,
+        hasOtherBackendSource: Boolean(extensionsDir),
+      });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
   }
 
   // Validate log-level

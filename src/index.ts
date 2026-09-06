@@ -54,6 +54,13 @@ export { REGISTRY_EVENTS, ErrorCodes, MODULE_ID_PATTERN, APCORE_EVENTS } from ".
 export { reportProgress, elicit, MCP_PROGRESS_KEY, MCP_ELICIT_KEY } from "./helpers.js";
 export type { ElicitResult } from "./helpers.js";
 export { createBridgeContext } from "./server/context.js";
+export {
+  openapiBackend,
+  projectModuleId,
+  resolveSpecLocation,
+  MODULE_ID_SEGMENT,
+  type OpenAPIBackendOptions,
+} from "./openapi-backend.js";
 export type { BridgeContext } from "./server/context.js";
 
 // ─── Auth Exports ────────────────────────────────────────────────────────────
@@ -256,6 +263,64 @@ interface GovernanceStateLike {
  * read (PROTOCOL_SPEC §6.6.5), and what to do with an unprotected surface is
  * left to the caller (here: warn and continue).
  */
+/**
+ * One finding from `ACL.validateRules()` (PROTOCOL_SPEC §6.2.1 tier 2).
+ *
+ * Matches apcore-js's real `RuleValidationFinding` shape exactly — measured
+ * against a live `ACL` instance, not assumed: `{ruleIndex, conditionPath,
+ * conditionKey, effect, syncResolvable, asyncResolvable}`. There is no
+ * `reason`/`message` field; apcore-js hands back structured data only, and
+ * the prose has to be built by whoever renders it (§6.1.3 — this is
+ * diagnostics, not a rule-level error string). An earlier version of this
+ * interface named `path`/`reason`/`message`, none of which exist on the real
+ * object, so `formatAclNeverMatchesWarnings` silently rendered `'?': ` for
+ * every finding — the field names are pinned by direct verification now.
+ */
+export interface AclRuleFindingLike {
+  ruleIndex: number;
+  conditionPath: string;
+  conditionKey?: string | null;
+  effect: string;
+  syncResolvable?: boolean;
+  asyncResolvable?: boolean;
+}
+
+/**
+ * Format the §6.2.1 tier-2 warnings: ACL rules that loaded cleanly and can
+ * protect nothing.
+ *
+ * apcore 0.29.0 closed the *shape* of a pattern array at every door, but that
+ * does not exhaust the inert class: `["$not", "*"]` has legal arity, exactly
+ * one operand, and matches nothing — the identical fail-open, reached through a
+ * well-formed array. apcore reports these through `ACL.validateRules()` as
+ * findings that load, change no decision, and are never rejected, because the
+ * predicate cannot be closed without freezing the pattern language.
+ *
+ * Pure formatting, exactly like `formatUnprotectedControlSurfaceWarning` above:
+ * a finding never fails startup, and deciding what to do with one is the
+ * caller's (here: warn and continue). Returns `null` when there is nothing to
+ * report.
+ *
+ * Call this only once the registry is assembled — `validateRules()` also
+ * reports `conditions` keys with no registered handler, and handler
+ * registration legitimately happens after discovery.
+ */
+export function formatAclNeverMatchesWarnings(
+  findings: AclRuleFindingLike[] | null | undefined,
+): string | null {
+  if (!findings || findings.length === 0) return null;
+  const lines = findings.map((f) => {
+    const key = f.conditionKey ? ` (${f.conditionKey})` : "";
+    return (
+      `mcp.acl.rules[${f.ruleIndex}] '${f.conditionPath}'${key}: this pattern is ` +
+      `well-formed but matches no legal module ID, so the '${f.effect}' rule protects ` +
+      "nothing. It still loads and still changes no decision (PROTOCOL_SPEC §6.1.3) — " +
+      "rewrite the pattern or remove the rule."
+    );
+  });
+  return lines.join("\n");
+}
+
 export function formatUnprotectedControlSurfaceWarning(
   state: GovernanceStateLike,
 ): string | null {
@@ -330,6 +395,26 @@ function tryGovernanceState(executor: Executor): GovernanceStateLike | null {
 }
 
 /**
+ * FR-ACL-004 / §6.2.1 tier 2: call `ACL.validateRules()` on the ACL actually
+ * wired into this executor call, once it is fully assembled, and return its
+ * findings — or `null` when there is no ACL, the ACL exposes no
+ * `validateRules`, or the call itself throws. Mirrors `tryGovernanceState`'s
+ * defensive shape: this is advisory diagnostics (PROTOCOL_SPEC §6.1.3), never
+ * enforcement, so a thrown or missing accessor is silently skipped rather
+ * than propagated.
+ */
+function tryValidateAclRules(acl: unknown): AclRuleFindingLike[] | null {
+  if (!acl || typeof acl !== "object") return null;
+  const fn = (acl as { validateRules?: () => AclRuleFindingLike[] }).validateRules;
+  if (typeof fn !== "function") return null;
+  try {
+    return fn.call(acl);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Scalar Config Bus keys consumed by serve()/asyncServe(). Snake-case names
  * match `MCP_DEFAULTS` in src/config.ts; serve() converts to camelCase and
  * applies a caller-wins precedence chain on top of these. [D9-002]
@@ -368,11 +453,13 @@ async function loadConfigBusOverrides(
   resolvedStrategy: string | undefined;
   combinedMiddleware: unknown[];
   effectiveAcl: unknown | null;
+  configOpenapi: unknown | null;
   configBusDefaults: ConfigBusDefaults;
 }> {
   let resolvedStrategy = strategy;
   let configMiddleware: unknown[] = [];
   let configAcl: unknown | null = null;
+  let configOpenapi: unknown | null = null;
   const configBusDefaults: ConfigBusDefaults = {};
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -404,6 +491,10 @@ async function loadConfigBusOverrides(
         const { buildAclFromConfig } = await import("./acl-builder.js");
         configAcl = await buildAclFromConfig(aclCfg);
       }
+      // Read (not build — the registry doesn't exist yet at this point in
+      // serve()/asyncServe()) the `mcp.openapi` section. PRD F-054
+      // Acceptance Criterion 1: `mcp.openapi.spec` alone must start a server.
+      configOpenapi = config.get?.("mcp.openapi") ?? null;
       // [D9-002] Load 9 scalar mcp.* keys. Snake-case → camelCase.
       const readStr = (k: string): string | undefined => {
         const v = config.get?.(k);
@@ -449,7 +540,7 @@ async function loadConfigBusOverrides(
   // Caller-supplied ACL wins over Config Bus.
   const effectiveAcl = callerAcl !== undefined ? callerAcl : configAcl;
 
-  return { resolvedStrategy, combinedMiddleware, effectiveAcl, configBusDefaults };
+  return { resolvedStrategy, combinedMiddleware, effectiveAcl, configOpenapi, configBusDefaults };
 }
 
 /**
@@ -624,7 +715,7 @@ export interface ServeOptions extends BaseServeOptions {
  * @param options - Server configuration options.
  */
 export async function serve(
-  registryOrExecutor: RegistryOrExecutor,
+  registryOrExecutor: RegistryOrExecutor | undefined = undefined,
   options: ServeOptions = {},
 ): Promise<void> {
   // [D9-002] Apply caller-wins precedence: caller option → Config Bus → hardcoded
@@ -686,8 +777,39 @@ export async function serve(
   const origError = console.error;
 
   // ── F-040: YAML Pipeline Config via Config Bus ─────────────────────
-  const { resolvedStrategy, combinedMiddleware, effectiveAcl, configBusDefaults } =
+  const { resolvedStrategy, combinedMiddleware, effectiveAcl, configOpenapi, configBusDefaults } =
     await loadConfigBusOverrides(strategy, callerMiddleware, callerAcl);
+
+  // PRD F-054 Acceptance Criterion 1: `mcp.openapi.spec` alone, with no
+  // explicit backend and no CLI flag, must start a server. When a backend
+  // IS given and `mcp.openapi` is ALSO configured, the two are unioned
+  // (given backend first, OpenAPI operations layered on top) and
+  // `mcp.openapi.prefix` becomes required — enforced inside
+  // `openapiBackend`'s own `hasOtherBackendSource` check.
+  let resolvedBackend: RegistryOrExecutor;
+  if (registryOrExecutor === undefined) {
+    if (!configOpenapi) {
+      throw new Error(
+        "registryOrExecutor is required unless mcp.openapi.spec is configured on the Config " +
+          "Bus (PRD F-054). Pass a Registry/Executor, or set mcp.openapi.spec.",
+      );
+    }
+    const { buildOpenapiBackendFromConfig } = await import("./openapi-backend.js");
+    resolvedBackend = (await buildOpenapiBackendFromConfig(configOpenapi)) as unknown as RegistryOrExecutor;
+  } else {
+    resolvedBackend = registryOrExecutor;
+    if (configOpenapi) {
+      const { buildOpenapiBackendFromConfig } = await import("./openapi-backend.js");
+      await buildOpenapiBackendFromConfig(configOpenapi, {
+        // Structural (this package's `Registry`) vs. nominal (apcore-js's
+        // class-based `Registry`) type mismatch — same cast convention used
+        // throughout this codebase's apcore-js interop (e.g.
+        // tests/acl-approval-gating-e2e.test.ts) for the identical reason.
+        registry: resolveRegistry(resolvedBackend) as never,
+        hasOtherBackendSource: true,
+      });
+    }
+  }
 
   // [D9-002] Resolve scalar config values: caller → Config Bus → hardcoded default.
   const transport = optTransport ?? configBusDefaults.transport ?? "stdio";
@@ -714,8 +836,8 @@ export async function serve(
     if (minLevel > 3) console.error = () => { };
   }
 
-  const registry = resolveRegistry(registryOrExecutor);
-  const executor = await resolveExecutor(registryOrExecutor, {
+  const registry = resolveRegistry(resolvedBackend);
+  const executor = await resolveExecutor(resolvedBackend, {
     approvalHandler: effectiveApprovalHandler,
     strategy: resolvedStrategy,
     middleware: combinedMiddleware,
@@ -731,6 +853,17 @@ export async function serve(
   const governanceState = tryGovernanceState(executor);
   if (governanceState) {
     const warning = formatUnprotectedControlSurfaceWarning(governanceState);
+    if (warning) origWarn(warning);
+  }
+
+  // FR-ACL-004 / §6.2.1 tier 2: report ACL rules that loaded cleanly and can
+  // protect nothing (e.g. ["$not", "*"]) — a well-formed pattern array that
+  // matches no legal module ID. Same placement and advisory contract as the
+  // governance-state warning above: never blocks startup, uses origWarn so
+  // it survives `logLevel` suppression.
+  const aclFindings = tryValidateAclRules(effectiveAcl);
+  if (aclFindings) {
+    const warning = formatAclNeverMatchesWarnings(aclFindings);
     if (warning) origWarn(warning);
   }
 
@@ -934,7 +1067,7 @@ export interface AsyncServeApp {
  * ```
  */
 export async function asyncServe(
-  registryOrExecutor: RegistryOrExecutor,
+  registryOrExecutor: RegistryOrExecutor | undefined = undefined,
   options: AsyncServeOptions = {},
 ): Promise<AsyncServeApp> {
   // [D9-002] See serve() for the rationale on the optX naming and post-load resolution.
@@ -988,8 +1121,39 @@ export async function asyncServe(
   const origError = console.error;
 
   // ── F-040: YAML Pipeline Config via Config Bus ─────────────────────
-  const { resolvedStrategy, combinedMiddleware, effectiveAcl, configBusDefaults } =
+  const { resolvedStrategy, combinedMiddleware, effectiveAcl, configOpenapi, configBusDefaults } =
     await loadConfigBusOverrides(strategy, callerMiddleware, callerAcl);
+
+  // PRD F-054 Acceptance Criterion 1: `mcp.openapi.spec` alone, with no
+  // explicit backend and no CLI flag, must start a server. When a backend
+  // IS given and `mcp.openapi` is ALSO configured, the two are unioned
+  // (given backend first, OpenAPI operations layered on top) and
+  // `mcp.openapi.prefix` becomes required — enforced inside
+  // `openapiBackend`'s own `hasOtherBackendSource` check.
+  let resolvedBackend: RegistryOrExecutor;
+  if (registryOrExecutor === undefined) {
+    if (!configOpenapi) {
+      throw new Error(
+        "registryOrExecutor is required unless mcp.openapi.spec is configured on the Config " +
+          "Bus (PRD F-054). Pass a Registry/Executor, or set mcp.openapi.spec.",
+      );
+    }
+    const { buildOpenapiBackendFromConfig } = await import("./openapi-backend.js");
+    resolvedBackend = (await buildOpenapiBackendFromConfig(configOpenapi)) as unknown as RegistryOrExecutor;
+  } else {
+    resolvedBackend = registryOrExecutor;
+    if (configOpenapi) {
+      const { buildOpenapiBackendFromConfig } = await import("./openapi-backend.js");
+      await buildOpenapiBackendFromConfig(configOpenapi, {
+        // Structural (this package's `Registry`) vs. nominal (apcore-js's
+        // class-based `Registry`) type mismatch — same cast convention used
+        // throughout this codebase's apcore-js interop (e.g.
+        // tests/acl-approval-gating-e2e.test.ts) for the identical reason.
+        registry: resolveRegistry(resolvedBackend) as never,
+        hasOtherBackendSource: true,
+      });
+    }
+  }
 
   // [D9-002] Resolve scalar config values: caller → Config Bus → hardcoded default.
   // asyncServe does not bind a transport (returns an ASGI-style app); transport,
@@ -1015,8 +1179,8 @@ export async function asyncServe(
     if (minLevel > 3) console.error = () => { };
   }
 
-  const registry = resolveRegistry(registryOrExecutor);
-  const executor = await resolveExecutor(registryOrExecutor, {
+  const registry = resolveRegistry(resolvedBackend);
+  const executor = await resolveExecutor(resolvedBackend, {
     approvalHandler: effectiveApprovalHandler,
     strategy: resolvedStrategy,
     middleware: combinedMiddleware,
@@ -1029,6 +1193,17 @@ export async function asyncServe(
   const governanceState = tryGovernanceState(executor);
   if (governanceState) {
     const warning = formatUnprotectedControlSurfaceWarning(governanceState);
+    if (warning) origWarn(warning);
+  }
+
+  // FR-ACL-004 / §6.2.1 tier 2: report ACL rules that loaded cleanly and can
+  // protect nothing (e.g. ["$not", "*"]) — a well-formed pattern array that
+  // matches no legal module ID. Same placement and advisory contract as the
+  // governance-state warning above: never blocks startup, uses origWarn so
+  // it survives `logLevel` suppression.
+  const aclFindings = tryValidateAclRules(effectiveAcl);
+  if (aclFindings) {
+    const warning = formatAclNeverMatchesWarnings(aclFindings);
     if (warning) origWarn(warning);
   }
 

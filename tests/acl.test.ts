@@ -31,6 +31,37 @@ describe("buildAclFromConfig()", () => {
     expect(acl).toBeInstanceOf(apcore.ACL);
   });
 
+  it("logs at INFO on success — cross-language parity with Python (A-004)", async () => {
+    // The spec's `## Contract: build_acl_from_config` Properties row states
+    // "logs at INFO on success" as a cross-language guarantee. Before this
+    // fix, only the Python bridge did — TypeScript and Rust were both
+    // silent, so an operator debugging via logs saw confirmation on Python
+    // only despite an identical config on all three bridges.
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await buildAclFromConfig({
+        default_effect: "deny",
+        rules: [{ callers: ["*"], targets: ["public.*"], effect: "allow" }],
+      });
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      const message = String(infoSpy.mock.calls[0]?.[0]);
+      expect(message).toContain("Built ACL with 1 rule(s)");
+      expect(message).toContain("default_effect=deny");
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("does not log at INFO when the section is absent (no ACL built)", async () => {
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await buildAclFromConfig(null);
+      expect(infoSpy).not.toHaveBeenCalled();
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it("builds an ACL with default_effect=allow", async () => {
     const apcore = await import("apcore-js");
     const acl = await buildAclFromConfig({

@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -93,17 +93,37 @@ describe("CLI (cli.ts)", () => {
     apcoreAvailable?: boolean;
     discoverCount?: number;
     serveFn?: ReturnType<typeof vi.fn>;
+    configOpenapi?: unknown;
+    useRealApcoreJs?: boolean;
   } = {}) {
-    const { apcoreAvailable = true, discoverCount = 0, serveFn } = opts;
+    const { apcoreAvailable = true, discoverCount = 0, serveFn, configOpenapi, useRealApcoreJs = false } = opts;
 
     process.argv = ["node", "cli.js", ...args];
 
     // Always mock apcore-js to prevent Vite resolution errors
-    if (apcoreAvailable) {
+    if (useRealApcoreJs) {
+      // openapi-backend.ts's internals (registry.register/list via the real
+      // toolkit writer) need a functional Registry, not the {discover} stub
+      // below — used only by the tests that actually exercise --from-openapi
+      // end to end.
+      vi.doMock("apcore-js", async () => vi.importActual("apcore-js"));
+    } else if (apcoreAvailable) {
       vi.doMock("apcore-js", () => ({
         Registry: vi.fn().mockImplementation(() => ({
           discover: vi.fn().mockResolvedValue(discoverCount),
         })),
+        // Only present when a test needs to exercise the mcp.openapi
+        // Config-Bus fallback (A-001) — real apcore-js's Config.getInstance()
+        // shape, narrowed to just what cli.ts reads.
+        ...(configOpenapi !== undefined
+          ? {
+              Config: {
+                getInstance: () => ({
+                  get: (key: string) => (key === "mcp.openapi" ? configOpenapi : undefined),
+                }),
+              },
+            }
+          : {}),
       }));
     } else {
       vi.doMock("apcore-js", () => {
@@ -177,13 +197,87 @@ describe("CLI (cli.ts)", () => {
 
   // ── Argument validation ────────────────────────────────────────────────
 
-  it("fails when --extensions-dir is missing", async () => {
+  it("fails when no backend source is given at all (A-001 relaxation)", async () => {
+    // Reversal: --extensions-dir is no longer the only backend source
+    // (--from-openapi and mcp.openapi on the Config Bus both count now — PRD
+    // F-054 Acceptance Criterion 1), so the failure message and exit code
+    // changed to match the backend-source rule, not a single required flag.
     const { exitCode } = await runMain([]);
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(2);
     expect(
-      errorMessages.some((m) => m.includes("--extensions-dir is required")),
+      errorMessages.some((m) => m.includes("a backend source is required")),
     ).toBe(true);
+  });
+
+  it("does not fail when neither flag is given but mcp.openapi is on the Config Bus", async () => {
+    // Before this fix, this CLI rejected the combination outright — the
+    // Config-Bus-aware serve() path was never reached at all.
+    const { exitCode, mockServe } = await runMain([], {
+      configOpenapi: { spec: "https://api.example.com/openapi.json" },
+    });
+
+    expect(exitCode).toBe(-1);
+    expect(mockServe).toHaveBeenCalled();
+    // undefined, not an empty stand-in Registry() — see cli.ts's comment: an
+    // empty Registry() would be mistaken for a second, explicit backend
+    // source and wrongly require mcp.openapi.prefix.
+    expect(mockServe.mock.calls[0]?.[0]).toBeUndefined();
+  });
+
+  it("fails when --extensions-dir and --from-openapi are combined without --openapi-prefix", async () => {
+    const { exitCode } = await runMain([
+      "--extensions-dir",
+      tmpDir,
+      "--from-openapi",
+      "https://api.example.com/openapi.json",
+    ]);
+
+    expect(exitCode).toBe(2);
+    expect(
+      errorMessages.some((m) => m.includes("openapi-prefix is required")),
+    ).toBe(true);
+  });
+
+  it("fails on a malformed --openapi-header", async () => {
+    const { exitCode } = await runMain([
+      "--from-openapi",
+      "https://api.example.com/openapi.json",
+      "--openapi-header",
+      "not-a-key-value-pair",
+    ]);
+
+    expect(exitCode).toBe(2);
+    expect(
+      errorMessages.some((m) => m.includes("openapi-header must be KEY:VALUE")),
+    ).toBe(true);
+  });
+
+  it("builds a working registry from a local --from-openapi document (no network)", async () => {
+    const specPath = join(tmpDir, "openapi.json");
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        openapi: "3.0.3",
+        info: { title: "T", version: "1.0.0" },
+        servers: [{ url: "https://api.example.com" }],
+        paths: {
+          "/pets": {
+            get: { operationId: "listPets", responses: { "200": { description: "ok" } } },
+          },
+        },
+      }),
+    );
+
+    const { exitCode, mockServe } = await runMain(["--from-openapi", specPath], {
+      useRealApcoreJs: true,
+    });
+
+    expect(exitCode).toBe(-1);
+    expect(mockServe).toHaveBeenCalled();
+    const registryArg = mockServe.mock.calls[0]?.[0] as { list: () => string[] } | undefined;
+    expect(registryArg).toBeDefined();
+    expect(registryArg!.list()).toContain("listpets");
   });
 
   it("fails when --extensions-dir path does not exist", async () => {

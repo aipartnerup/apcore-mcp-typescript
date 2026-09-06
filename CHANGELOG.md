@@ -6,6 +6,162 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.20.1] - 2026-09-06
+
+Bugfix release from a `/apcore-skills:sync` pass across all three bridges. 0.20.0's tests all passed
+and its features work as documented — this release closes gaps between what shipped and what the
+PRD/SRS actually promise, found by re-verifying documented claims against source directly rather than
+against the 0.20.0 session's own narrative. 793 tests pass (was 782).
+
+### Fixed
+
+- **The CLI never got `--from-openapi` or any of the seven `--openapi-*` flags at all.** PRD F-054
+  documents seven CLI flags for this bridge; none of them existed in `src/cli.ts` — confirmed by
+  grep returning zero hits for `openapi` in that file before this release. `--from-openapi`,
+  `--openapi-base-url`, `--openapi-prefix`, `--openapi-include`, `--openapi-exclude`,
+  `--openapi-header` (repeatable), and `--openapi-no-deprecated` are now parsed, validated (prefix
+  required when combined with `--extensions-dir`, malformed `--openapi-header` rejected), and wired
+  through to `openapiBackend`.
+
+- **`mcp.openapi.spec` set on the Config Bus alone now starts a server (PRD F-054 Acceptance
+  Criterion 1).** `mcp.openapi` was registered as a Config Bus namespace default — the key
+  round-tripped — but nothing ever read it back, in either `cli.ts` or `serve()`/`asyncServe()`.
+  `registryOrExecutor` is now optional on `serve()`/`asyncServe()`; when omitted, the backend
+  resolves from `mcp.openapi` alone, throwing when neither a backend nor `mcp.openapi.spec` is
+  given. When both an explicit backend and `mcp.openapi` are configured, the two are unioned
+  (backend first, OpenAPI layered on top) and `mcp.openapi.prefix` becomes required. New
+  `buildOpenapiBackendFromConfig` helper (mirrors `acl-builder.ts`'s `buildAclFromConfig`) in
+  `openapi-backend.ts`, exported alongside the existing `openapiBackend`.
+
+- **§6.2.1 tier-2 ACL diagnostic (FR-ACL-004) was completely dead code.** `formatAclNeverMatchesWarnings`
+  was exported from `index.ts` with zero call sites anywhere in `src/` and zero references in any
+  of the 33 test files. The 0.20.0 CHANGELOG entry for this function ("Callers pass
+  `ACL.validateRules()` output once the registry is assembled") described a wiring that did not
+  exist. Now called from `serve()`/`asyncServe()` after the executor is fully assembled, using the
+  same `effectiveAcl` the executor itself was built with.
+
+- **`AclRuleFindingLike`'s field names did not match apcore-js's real `ACL.validateRules()` finding
+  shape — even once wired, every warning would have rendered as `mcp.acl.rules[0] '?': `.** The
+  real shape (verified directly against a live `ACL` instance) is `{ruleIndex, conditionPath,
+  conditionKey, effect, syncResolvable, asyncResolvable}` — no `path`/`reason`/`message` field
+  exists at all. `formatAclNeverMatchesWarnings` now reads the real fields and constructs the
+  explanatory sentence itself (apcore hands back structured data only, no free-text reason).
+
+- **`build_acl_from_config`'s success log (spec: "logs at INFO on success") only fired in Python.**
+  `acl-builder.ts` had zero logging calls anywhere in the file. Pre-existing (not introduced in
+  0.20.0) but never previously caught — no test asserted the log fires in any language. Added
+  `console.info("Built ACL with N rule(s), default_effect=X")` on success, matching Python and the
+  spec's stated cross-language guarantee.
+
+- **`mcp.openapi.acknowledge_unapproved_writes` was documented as the suppression for the "nothing
+  will ask for approval" warning (FR-OPENAPI-005) in the warning's own message text, but nothing
+  ever read it.** `openapiBackend` now accepts `acknowledgeUnapprovedWrites?: boolean` and skips
+  the warning when true; `buildOpenapiBackendFromConfig` reads it from the Config Bus mapping.
+
+- **`config.ts`'s `MCP_DEFAULTS` never got an `openapi` key.** Python's got one; TypeScript's did
+  not, so `Config.get("mcp.openapi")` had no registered default and no documented round-trip.
+
+### Tests
+
+- `tests/cli.test.ts` — 5 new cases: the Config-Bus-only backend, the missing-prefix combination
+  error, malformed `--openapi-header`, and an end-to-end local-file `--from-openapi` run (no
+  network) that asserts the resulting registry actually contains the scanned module.
+- `tests/acl-tier2-warning.test.ts` (5 cases, new file) — the corrected `AclRuleFindingLike` shape,
+  and the real `asyncServe()` wiring against a live `apcore-js` `ACL` carrying an inert rule;
+  asserts the exact string `'?'` never appears, which is what the bug produced.
+- `tests/acl.test.ts` — 2 new cases for the `console.info` success log.
+
+### Documentation
+
+- `docs/features/openapi-backend.md`'s `## Contract: openapi_backend` Returns section and
+  `docs/srs-apcore-mcp.md`'s FR-OPENAPI-001 both claimed registered-module `metadata` visibility as
+  universal. Measured directly: only Rust's writer preserves it; Python's and TypeScript's both
+  drop it — an upstream (apcore-toolkit) inconsistency, now stated as Rust-only in both documents.
+- `docs/srs-apcore-mcp.md`'s FR-OPENAPI-002 heading corrected from "projects unchanged onto both
+  protocol surfaces" to "is projected, then reaches both protocol surfaces unchanged" — the old
+  text contradicted its own Description and Boundary Conditions.
+
+## [0.20.0] - 2026-09-06
+
+Feature release: the **OpenAPI backend** — point the bridge at an OpenAPI 3.0/3.1 document and every
+operation becomes an MCP tool, proxied over HTTP — plus the `mcp.acl` half of apcore 0.29.0's
+PROTOCOL_SPEC §6.2.1 pattern-array closure. Raises the required `apcore-js` floor to `0.30.0` and
+the `apcore-toolkit` floor to `0.11.1`. 782 tests pass.
+
+### Added
+
+- **`src/openapi-backend.ts` — a third backend source.** `openapiBackend(spec, options?)` composes
+  apcore-toolkit's shipped pieces (`loadSpec` → `OpenAPIScanner.scan` →
+  `HTTPProxyRegistryWriter.write`) into a populated `Registry` and hands it to the machinery this
+  bridge already has: no scanning logic, no schema conversion and no new execution path. Exported
+  from the package root alongside `projectModuleId`, `resolveSpecLocation`, `MODULE_ID_SEGMENT` and
+  the `OpenAPIBackendOptions` type. It returns a `Promise` — `loadSpec` is async here and
+  synchronous in Python and Rust, which is a language difference the shared fixture does not assert.
+
+- **A module-ID projection, without which the backend serves nothing.** apcore-toolkit's
+  `deriveModuleId` sanitizes to `[A-Za-z0-9_.-]`; apcore's registry accepts only
+  `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`. Of nine realistic operation shapes only two register
+  unrepaired, and the canonical Swagger Petstore (`listPets`, `createPets`, `showPetById`) is
+  entirely in the rejected set. `projectModuleId` lowercases and maps `-` to `_`; a segment that
+  still does not begin with a lowercase letter (`/v1/2fa`) is **skipped with a warning** rather than
+  repaired, because completing it means inventing a character. The projection runs after any
+  caller-supplied `transformModule` and before the scanner's `deduplicateIds`.
+
+- **A pre-write collision preflight**, fatal and atomic, naming every colliding ID; and a mandatory
+  `prefix` when the OpenAPI backend is combined with another backend source.
+
+- **A startup warning that nothing will ask for approval before a write.** Reports the absence of an
+  approval path, never the presence of protection — an attached ACL does not suppress it, following
+  the rule apcore states on `GovernanceState.unprotectedControlSurface`.
+
+- **`formatAclNeverMatchesWarnings(findings)` — the §6.2.1 tier-2 diagnostic.** Pure formatting,
+  exactly like the `formatUnprotectedControlSurfaceWarning` beside it: `["$not", "*"]` has legal
+  arity, exactly one operand, and matches nothing, so it loads, changes no decision, and must still
+  be reported. Callers pass `ACL.validateRules()` output once the registry is assembled.
+
+### Changed
+
+- **`buildAclFromConfig` validates in PROTOCOL_SPEC §6.2.1's normative order** — `effect` →
+  `approval` → `callers` → `targets`, with `defaultEffect` ahead of the rule loop and the
+  unknown-key check ahead of all four. This builder ran it in reverse, so a rule wrong in both
+  `effect` and `callers` was refused for `callers` here and for `effect` by apcore's own doors.
+
+- **`buildAclFromConfig` validates rule by rule.** apcore-js validates inside the `ACL` constructor
+  over the whole list and exports no per-rule validator, so a throwaway single-rule construction is
+  the only way to learn which rule was at fault while the builder still knows its index.
+
+- **Required floors: `apcore-js>=0.30.0`, `apcore-toolkit>=0.11.1`.** apcore **0.29.0** is the
+  correctness floor; apcore-toolkit **0.11.0** the capability floor; **0.11.1** changes no API and
+  forces apcore **0.30.0**, which is independently needed for `Config.projectRoot`.
+
+### Fixed
+
+- **`ACLRuleError` escaped `buildAclFromConfig` raw and without the rule index.** apcore-js's own
+  message names its position within the list it was handed; the bridge now re-raises as an `Error`
+  prefixed `mcp.acl.rules[i]` (`mcp.acl` for a section-scoped fault), preserving apcore's message
+  verbatim after the prefix and chaining the original as `cause`.
+
+- **`mcp.openapi.spec` is path-typed and apcore 0.30.0's protections do not reach it.**
+  `Config.pathTypedKeys()` is a fixed set of apcore's own keys and never consults a namespace
+  registered through `Config.registerNamespace`, and the §9.2.1 requirement-5 empty-value discard is
+  gated on it. `resolveSpecLocation` owns three rules instead: an `http(s)://` value verbatim, a
+  set-but-empty value discarded with a warning so resolution falls through, and a relative path
+  resolved against `Config.projectRoot`.
+
+### Tests
+
+- `tests/openapi-backend-conformance.test.ts` drives the new shared fixture `openapi_backend.json`
+  (9 module cases + 3 spec-resolution cases + 4 error cases).
+- `tests/acl-conformance.test.ts` drives `acl_config.json` at `contract_version` 1.2 (32 cases) and
+  understands the 1.2 additions `expected_error_substrings`, `expected_error_names_field` and
+  `must_not_contain`. The fixture pins the **bare** field name rather than a reason phrase: for one
+  §6.2.1 fault apcore-js writes *"Rule 0 'targets' has an illegal pattern-array shape: '$not' at
+  index 0 takes exactly one operand and this carries 2"* while apcore-python writes an entirely
+  different sentence, and apcore-rust names the offending element (`'callers[1]'`) rather than the
+  field. An earlier draft of the fixture pinned fragments read off apcore-python alone; two of six
+  failed here.
+
+
 ## [0.19.0] - 2026-09-01
 
 `system.*` management surface correctness and governance-transparency release.

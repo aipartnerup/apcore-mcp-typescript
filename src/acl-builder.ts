@@ -200,6 +200,26 @@ export async function buildAclFromConfig(
     const targets = rec.targets;
     const effect = rec.effect;
 
+    // PROTOCOL_SPEC §6.2.1 (apcore 0.29.0) fixes the order in which a rule bad
+    // on more than one axis is refused: `effect` -> `approval` -> `callers` ->
+    // `targets`, with the rule index dominating. This builder used to run it in
+    // reverse, so a rule wrong in both `effect` and `callers` was refused for
+    // `callers` here and for `effect` by apcore's own doors — the same file,
+    // two answers, depending on which door it reached first. The unknown-key
+    // check above stays ahead of all four: a Config-Bus shape fault with no
+    // apcore counterpart. `defaultEffect` is judged ahead of the rule loop.
+    if (typeof effect !== "string" || !ALLOWED_EFFECTS.has(effect)) {
+      throw new Error(
+        `mcp.acl.rules[${idx}] 'effect' must be 'allow' or 'deny', got '${effect}'`,
+      );
+    }
+    if (rec.approval !== undefined && rec.approval !== null) {
+      if (typeof rec.approval !== "string" || !ALLOWED_APPROVALS.has(rec.approval)) {
+        throw new Error(
+          `mcp.acl.rules[${idx}] 'approval' must be 'required' or 'not_required' (or omitted), got '${String(rec.approval)}'`,
+        );
+      }
+    }
     if (!Array.isArray(callers) || callers.length === 0) {
       throw new Error(
         `mcp.acl.rules[${idx}] 'callers' must be a non-empty list`,
@@ -208,11 +228,6 @@ export async function buildAclFromConfig(
     if (!Array.isArray(targets) || targets.length === 0) {
       throw new Error(
         `mcp.acl.rules[${idx}] 'targets' must be a non-empty list`,
-      );
-    }
-    if (typeof effect !== "string" || !ALLOWED_EFFECTS.has(effect)) {
-      throw new Error(
-        `mcp.acl.rules[${idx}] 'effect' must be 'allow' or 'deny', got '${effect}'`,
       );
     }
 
@@ -231,15 +246,53 @@ export async function buildAclFromConfig(
       rule.conditions = rec.conditions as Record<string, unknown>;
     }
     if (rec.approval !== undefined && rec.approval !== null) {
-      if (typeof rec.approval !== "string" || !ALLOWED_APPROVALS.has(rec.approval)) {
-        throw new Error(
-          `mcp.acl.rules[${idx}] 'approval' must be 'required' or 'not_required' (or omitted), got '${String(rec.approval)}'`,
-        );
-      }
-      rule.approval = rec.approval;
+      rule.approval = rec.approval as string;
+    }
+
+    // Attribute apcore's own refusal to THIS rule. apcore-js validates inside
+    // the ACL constructor over the whole list and exports no per-rule
+    // validator, so a throwaway single-rule construction is the only way to
+    // learn which rule was at fault while we still know its index. apcore's
+    // message names "Rule 0" (its index within the throwaway list), which the
+    // bridge prefix corrects to the real position.
+    try {
+      new ACL([rule], defaultEffect);
+    } catch (err) {
+      throw wrapAclRuleError(err, `mcp.acl.rules[${idx}]`);
     }
     rules.push(rule);
   }
 
-  return new ACL(rules, defaultEffect);
+  try {
+    const acl = new ACL(rules, defaultEffect);
+    // Cross-language parity: the spec's `## Contract: build_acl_from_config`
+    // Properties row states "logs at INFO on success" as a cross-language
+    // guarantee. Only the Python bridge did this before now — TypeScript and
+    // Rust were both silent, an operator debugging via logs saw confirmation
+    // on Python only. `console.info` (not `console.log`) so `logLevel`
+    // suppression (which patches `console.info`) applies the same way it
+    // does to every other INFO-level line this bridge emits.
+    console.info(`Built ACL with ${rules.length} rule(s), default_effect=${defaultEffect}`);
+    return acl;
+  } catch (err) {
+    // Section-scoped: the constructor re-validates every rule it is handed
+    // (apcore 0.29.0, spec v1.33.0) but the per-rule loop above has already
+    // attributed anything attributable, so this prefix carries no index.
+    throw wrapAclRuleError(err, "mcp.acl");
+  }
+}
+
+/**
+ * Re-raise apcore's `ACLRuleError` as the bridge's own error, prefixed.
+ *
+ * apcore's message is preserved verbatim after the prefix — the reason text is
+ * apcore's to own, and its wording differs from apcore-python's for the same
+ * fault — and the original is chained as `cause`. Anything that is not an
+ * `ACLRuleError` propagates untouched.
+ */
+function wrapAclRuleError(err: unknown, prefix: string): unknown {
+  if (!(err instanceof Error) || err.constructor.name !== "ACLRuleError") {
+    return err;
+  }
+  return new Error(`${prefix} ${err.message}`, { cause: err });
 }
